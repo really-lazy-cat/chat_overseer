@@ -17,6 +17,8 @@ from googleapiclient.discovery import build
 import time
 import logging
 import pandas as pd
+# Regex
+import re
 
 
 logging.basicConfig(
@@ -51,6 +53,13 @@ WARNING = "As per CBUAE regulations, file sharing is not permitted on this platf
 SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
 NOTIFICATION_EMAIL = "shjops@cosmosinsurance.com"  # email notifications are sent from
 NOTIFICATION_EMAIL_TO = "robin@cosmosinsurance.com" # email notifications are sent to 
+
+# Payment domains to flag
+PAYMENT_DOMAINS = [
+    "network.ae", "payfort.com", "checkout.com", "tap.company",
+    "stripe.com", "paypal.com"
+]
+
 
 # ChatApp Credentials
 
@@ -338,24 +347,91 @@ def gmail_authenticate():
     return build("gmail", "v1", credentials=creds)
 
 
-def flag_text(text) -> bool:
+def flag_text(text: str) -> tuple[bool, list[str]]:
     """
-    Checks the text of the message for certain keywords and then returns a boolean value based on whether or not they are found.
+    Checks the text of the message for certain keywords and regex patterns.
+    Returns a tuple of (flagged: bool, reasons: list of what was found).
     """
+    if not text:
+        return False, []
+
+    found = []
+    text_lower = text.lower().strip()
+
+    # ── Keywords ──────────────────────────────────────────────────────────────
     keywords = [
-        "Passport Number",      # to be continued...
-        "Emirates ID",
-        "EID",
-        "Policy Number",
-        "Claim Number",
-        "Request Number",
+        # Identity & Personal Data
+        "passport", "passport number", "emirates id", "emirates id number",
+        "eid", "national id", "visa number", "residence visa", "uid",
+        "unified number", "date of birth", "dob",
+        # Vehicle & Motor
+        "plate number", "plate no", "registration number", "reg number",
+        "chassis number", "chassis no", "vin", "vehicle registration",
+        "traffic file", "mulkiya",
+        # Insurance — Policy
+        "policy number", "policy no", "pol no", "cover note",
+        "certificate number", "certificate of insurance", "coi",
+        "endorsement number", "schedule", "premium", "deductible",
+        "excess", "renewal", "expiry date", "sum insured",
+        # Insurance — Claims
+        "claim number", "claim no", "clm", "survey number", "repair order",
+        "damage report", "accident report", "loss adjuster", "surveyor",
+        "reimbursement", "claim amount", "settlement", "approved", "rejected",
+        # Financial & Payment
+        "aed", "payment", "transfer", "bank account", "account number",
+        "iban", "card number", "credit card", "debit card", "cvv",
+        "invoice number", "receipt", "premium amount", "outstanding",
+        "balance due", "payment link", "cheque number", "pdc",
+        # Medical & Health
+        "member id", "medical card", "health card", "diagnosis",
+        "prescription", "hospital", "clinic", "pre-authorization", "pre-auth",
+        "lab result", "medical report", "treatment", "chronic",
+        "insurance card", "network", "tpa",
+        # Contact & Personal Information
+        "mobile number", "phone number", "email address", "home address",
+        "po box", "emirates post", "bank details", "salary",
+        "date of joining", "employee id", "staff id",
+        # Transaction & Reference Numbers
+        "request number", "ref no", "reference number", "transaction id",
+        "quote number", "application number", "file number", "case number",
+        "ticket number",
+        # High-Risk Phrases
+        "send me your", "please share your", "can you send", "attach",
+        "screenshot", "copy of", "scan of", "photo of your",
+        "image of", "forward", "resend",
     ]
 
     for keyword in keywords:
-        if keyword.lower().strip() in text.lower().strip():
-            return True
+        if keyword.lower() in text_lower:
+            found.append(f"Keyword: '{keyword}'")
+
+    # ── Regex Patterns ────────────────────────────────────────────────────────
+    patterns = {
+        "UAE Mobile Number": r"\+?971\s?5[0-9]\s?\d{3}\s?\d{4}",
+        "Emirates ID":       r"784-\d{4}-\d{7}-\d{1}",
+        "IBAN":              r"AE\d{2}\s?\d{3}\s?\d{16}",
+        "Email Address":     r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+        "UAE Plate Number":  r"(?i)(plate|reg|mulkiya|registration)[\s\S]{0,20}[A-Z]{1,2}\s?\d{1,5}",
+    }
+
+    for label, pattern in patterns.items():
+        if re.search(pattern, text):
+            found.append(f"Pattern: {label}")
+
+    # ── Payment Links ─────────────────────────────────────────────────────────
+    urls = re.findall(r"https?://[^\s]+", text)
+    for url in urls:
+        for domain in PAYMENT_DOMAINS:
+            if domain in url:
+                found.append(f"Payment Link: {url}")
+                break
         else:
-            return False
+            # Flag any URL not on an approved list
+            found.append(f"URL detected: {url}")
+
+    if found:
+        return True, found
+    return False, []
 
 
 def send_warning(license_id, messenger_type, chat_id, warning_text) -> tuple[bool, float]:
@@ -381,7 +457,8 @@ def send_warning(license_id, messenger_type, chat_id, warning_text) -> tuple[boo
     except requests.RequestException as e:
         logging.error(f"Network error when sending warning to {chat_id} : {e}.")
 
-def send_notification(chat_id, message_id, side, name, phone, messenger_type, has_attachment=False, text_flagged=False) -> bool:
+def send_notification(chat_id, message_id, side, name, phone, messenger_type, 
+                      has_attachment=False, text_flagged=False, reasons=None) -> bool:
     """
     Sends a notification through mail with the necessary details.
     """
@@ -406,18 +483,21 @@ Details:
                     """
 
         elif text_flagged:
-            subject = F"Message Flagged"
+            subject = "Message Flagged"
+            reasons_text = "\n".join(f"  - {r}" for r in (reasons or []))
             body = f"""
-A message has been flagged for having certain keywords.
+    A message has been flagged for the following reasons:
 
-Details:
-- Sent by: {name} | {side_label}
-- Phone: {phone}
-- ChatID: {chat_id}
-- Message ID: {message_id}
-- Messenger: {messenger_type}
-- Time: {time.strftime("%Y-%m-%d %H:%M:%S")}
-                    """
+    {reasons_text}
+
+    Details:
+    - Sent by: {name} | {side_label}
+    - Phone: {phone}
+    - Chat ID: {chat_id}
+    - Message ID: {message_id}
+    - Messenger: {messenger_type}
+    - Time: {time.strftime("%Y-%m-%d %H:%M:%S")}
+            """
 
         message = MIMEText(body)
         message["to"] = NOTIFICATION_EMAIL_TO
@@ -464,16 +544,16 @@ def handle_message(data):
             phone = from_user.get("phone")
 
             
-
-            
             if not has_file:
-                text_flagged = flag_text(text)
-                print(f"TEXT FLAGGED: {text_flagged}")
+                text_flagged, reasons = flag_text(text)
                 if text_flagged:
-                    send_notification(chat_id, message_id, side, name, phone, messenger_type, has_file, text_flagged)
-                    return
-                else:
-                    return          # if the text is not flagged, ignore it
+                    logging.warning(f"Message flagged — reasons: {reasons}")
+                    send_notification(
+                        chat_id, message_id, side, name, phone,
+                        messenger_type, has_attachment=False,
+                        text_flagged=True, reasons=reasons
+                    )
+                return
             
             logging.warning(
                 f"File detected - message id=({message_id}), "
