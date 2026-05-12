@@ -1,5 +1,5 @@
 # Libraries for ChatApp connection
-import pysher
+import websocket
 import requests
 import json
 import threading
@@ -22,6 +22,12 @@ logging.basicConfig(
     format=f"%(asctime)s [%(levelname)s] %(message)s",
 )
 
+
+# Constants related to Websocket
+SOCKET_URL = "wss://socket.chatapp.online:6001/app/ChatsAppApiProdKey?protocol=7&client=python&version=1.0"
+
+ws_instance = None
+ws_thread = None
 
 # Constants related to ChatApp's API
 EMAIL = "harish@cosmosinsurance.com"
@@ -144,50 +150,128 @@ def token_refresh_loop():
 
 # WEBSOCKET / PUSHER
 
-def subscribe(pusher):
-    channel_name = f"private-v1.licenses.{LICENSE_ID}.messengers.{MESSENGER_TYPE}"
-    channel = pusher.subscribe(channel_name)
-    channel.bind("message", handle_message)
-    logging.info(f"Subscribed to {channel_name}")
+def send_ws(ws, event, data=None):
+    payload = json.dumps({"event": event, "data": data or {}})
+    ws.send(payload)
 
 
-def create_pusher():
-    pusher = pysher.Pusher(
-        key="ChatsAppApiProdKey",
-        custom_host="socket.chatapp.online",
-        port=6001,
-        secure=True,
-        auth_endpoint="https://api.chatapp.online/broadcasting/auth",
-        auth_endpoint_headers={"Authorization": ACCESS_TOKEN}
+def authenticate_channel(ws, socket_id, channel_name):
+    """Hit ChatApp's auth endpoint to get the auth signature for a private channel."""
+    response = requests.post(
+        "https://api.chatapp.online/broadcasting/auth",
+        headers={
+            "Authorization": ACCESS_TOKEN,
+            "Content-Type": "application/json"
+        },
+        json={
+            "socket_id": socket_id,
+            "channel_name": channel_name
+        }
     )
-    pusher.connection.bind(
-        "pusher:connection_established",
-        lambda _: subscribe(pusher)
-    )
-    pusher.connection.bind(
-        "pusher:connection_failed",
-        lambda _: handle_disconnect()
-    )
-    return pusher
+    if response.ok:
+        return response.json().get("auth")
+    else:
+        logging.error(f"Channel auth failed: {response.status_code} — {response.text}")
+        return None
+
+def ping_loop(ws):
+    """Send Pusher application-level pings every 25 seconds to keep the connection alive."""
+    while True:
+        time.sleep(25)
+        try:
+            send_ws(ws, "pusher:ping")
+            logging.debug("Sent pusher:ping")
+        except Exception as e:
+            logging.error(f"Failed to send ping: {e}")
+            break
+
+def on_open(ws):
+    logging.info("WebSocket connection opened.")
+    # Start ping thread
+    ping_thread = threading.Thread(target=ping_loop, args=(ws,), daemon=True)
+    ping_thread.start()
 
 
-def handle_disconnect():
-    logging.warning("WebSocket disconnected — reconnecting in 5 seconds...")
+def on_message(ws, message):
+    try:
+        payload = json.loads(message)
+        event = payload.get("event")
+        data = payload.get("data")
+
+        # Parse nested data string if needed
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                pass
+
+        if event == "pusher:connection_established":
+            socket_id = data.get("socket_id")
+            logging.info(f"Connected — socket_id={socket_id}")
+
+            # Subscribe to private channel
+            channel_name = f"private-v1.licenses.{LICENSE_ID}.messengers.{MESSENGER_TYPE}"
+            auth = authenticate_channel(ws, socket_id, channel_name)
+            if auth:
+                send_ws(ws, "pusher:subscribe", {
+                    "channel": channel_name,
+                    "auth": auth
+                })
+
+        elif event == "pusher_internal:subscription_succeeded":
+            logging.info(f"Subscribed to channel: {payload.get('channel')}")
+
+        elif event == "pusher:ping":
+            # Respond to server pings immediately
+            send_ws(ws, "pusher:pong")
+            logging.debug("Responded to ping.")
+
+        elif event == "message":
+            handle_message(json.dumps(data))
+
+        elif event == "pusher:error":
+            logging.error(f"Pusher error: {data}")
+
+    except Exception as e:
+        logging.error(f"Error in on_message: {e}")
+
+
+def on_error(ws, error):
+    logging.error(f"WebSocket error: {error}")
+
+
+def on_close(ws, close_status_code, close_msg):
+    logging.warning(f"WebSocket closed — code={close_status_code}, msg={close_msg}. Reconnecting in 5 seconds...")
     time.sleep(5)
-    reconnect_websocket()
+    start_websocket()
+
+
+def start_websocket():
+    global ws_instance, ws_thread
+    ws_instance = websocket.WebSocketApp(
+        SOCKET_URL,
+        on_open=on_open,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close
+    )
+    ws_thread = threading.Thread(
+        target=lambda: ws_instance.run_forever(ping_interval=25, ping_timeout=10),
+        daemon=True
+    )
+    ws_thread.start()
+    logging.info("WebSocket thread started.")
 
 
 def reconnect_websocket():
-    global pusher_instance
-    logging.info("Reconnecting WebSocket with new token...")
+    global ws_instance
+    logging.info("Reconnecting WebSocket with refreshed token...")
     try:
-        pusher_instance.disconnect()
+        ws_instance.close()
     except Exception:
         pass
     time.sleep(2)
-    pusher_instance = create_pusher()
-    pusher_instance.connect()
-    logging.info("WebSocket reconnected.")
+    start_websocket()
 
 # GMAIL
 
@@ -405,8 +489,7 @@ def main():
     logging.info("Token refresh thread started.")
 
     # Start WebSocket
-    pusher_instance = create_pusher()
-    pusher_instance.connect()
+    start_websocket()
     logging.info("Listener started — monitoring for file messages...")
 
     try:
@@ -414,8 +497,8 @@ def main():
             time.sleep(1)
     except KeyboardInterrupt:
         logging.info("Shutting down...")
-        pusher_instance.disconnect()
-
+        if ws_instance:
+            ws_instance.close()
 
 if __name__ == "__main__":
     main()

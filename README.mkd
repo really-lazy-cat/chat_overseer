@@ -1,0 +1,26 @@
+# Chat Overseer
+
+    Oversees chats to check for any attachments that are shared or keywords that are flagged in violation of CBUAE regulations. If an attachment is shared, an automated message is sent requesting the message to be deleted. Finally, a notification is sent via email with necessary information included.
+
+## Execution:
+
+    The script is kept to run at all times. If a message is either sent or received, it is read. If the message has an attachment, an automated message asking the file to be deleted is sent back. If not, then the body of the message is scanned for certain keywords:
+     - Passport Number
+     - Emirates ID
+     - EID
+     - Policy Number
+     - Claim Number
+     - Request Number
+    If these keywords exist, then the message is flagged for review and a notification is sent via mail with the necessary information.
+
+    Furthermore if a message with an attachment is flagged, then an interal log is maintained by the script in the form of a csv file with the following columns:
+     - Sender's Name
+     - Sender's Number
+     - ChatID (Client's Number)
+     - Warning Sent
+     - Time Warning was Sent
+     - Notification Sent
+
+    Note that ChatID is always the number of the client. 
+
+    In case of an employee sending the attachment, the Sender's Name and Sender's Number fields will be the standard company number on ChatApp, the only way of identifying where the message was sent would be through the ChatID.
