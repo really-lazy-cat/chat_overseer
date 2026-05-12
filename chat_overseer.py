@@ -1,5 +1,7 @@
 # Libraries for ChatApp connection
 import websocket
+import ssl
+import certifi
 import requests
 import json
 import threading
@@ -30,6 +32,7 @@ ws_instance = None
 ws_thread = None
 
 # Constants related to ChatApp's API
+CREDENTIALS_FILE = "sensitive_info/credentials_chatapp.json"
 EMAIL = "harish@cosmosinsurance.com"
 PASSWORD = "dd05aacf896eb1d751353321d9e34b7f"
 APP_ID = "app_55017_1"
@@ -49,8 +52,39 @@ WARNING = "As per CBUAE regulations, file sharing is not permitted on this platf
 
 # Mail related details
 SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
-NOTIFICATION_EMAIL = "ronakpunjabi2@gmail.com"  # email notifications are sent from
-NOTIFICATION_EMAIL_TO = "ronakpunjabi2@gmail.com" # email notifications are sent to 
+NOTIFICATION_EMAIL = "shjops@cosmosinsurance.com"  # email notifications are sent from
+NOTIFICATION_EMAIL_TO = "robin@cosmosinsurance.com" # email notifications are sent to 
+
+# ChatApp Credentials
+
+def load_chatapp_credentials():
+    global EMAIL, PASSWORD, APP_ID
+    if os.path.exists(CREDENTIALS_FILE):
+        with open(CREDENTIALS_FILE, "r") as f:
+            data = json.load(f)
+        EMAIL = data["email"]
+        PASSWORD = data["password"]
+        APP_ID = data["appId"]
+        logging.info("ChatApp credentials loaded.")
+        return True
+    return False
+
+def save_chatapp_credentials(email, password, app_id):
+    global EMAIL, PASSWORD, APP_ID
+    EMAIL = email
+    PASSWORD = password
+    APP_ID = app_id
+    os.makedirs(os.path.dirname(CREDENTIALS_FILE), exist_ok=True)
+    with open(CREDENTIALS_FILE, "w") as f:
+        json.dump({"email": email, "password": password, "appId": app_id}, f)
+    logging.info("ChatApp credentials saved.")
+
+def prompt_and_save_chatapp_credentials():
+    print("ChatApp credentials not found. Please enter them below:")
+    email = input("Email: ")
+    password = input("Password: ")
+    app_id = input("App ID: ")
+    save_chatapp_credentials(email, password, app_id)
 
 
 # TOKENS
@@ -248,6 +282,10 @@ def on_close(ws, close_status_code, close_msg):
 
 def start_websocket():
     global ws_instance, ws_thread
+    
+    ssl_context = ssl.create_default_context()
+    ssl_context.load_verify_locations(certifi.where())
+    
     ws_instance = websocket.WebSocketApp(
         SOCKET_URL,
         on_open=on_open,
@@ -256,7 +294,11 @@ def start_websocket():
         on_close=on_close
     )
     ws_thread = threading.Thread(
-        target=lambda: ws_instance.run_forever(ping_interval=25, ping_timeout=10),
+        target=lambda: ws_instance.run_forever(
+            ping_interval=25,
+            ping_timeout=10,
+            sslopt={"context": ssl_context}
+        ),
         daemon=True
     )
     ws_thread.start()
@@ -475,6 +517,9 @@ def handle_message(data):
 
 def main():
     global pusher_instance
+
+    if not load_chatapp_credentials():
+        prompt_and_save_chatapp_credentials()
 
     # Load or fetch tokens
     if not load_tokens():
