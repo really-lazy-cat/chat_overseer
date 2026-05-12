@@ -33,9 +33,6 @@ ws_thread = None
 
 # Constants related to ChatApp's API
 CREDENTIALS_FILE = "sensitive_info/credentials_chatapp.json"
-EMAIL = "harish@cosmosinsurance.com"
-PASSWORD = "dd05aacf896eb1d751353321d9e34b7f"
-APP_ID = "app_55017_1"
 LICENSE_ID = 55570
 MESSENGER_TYPE = "caWhatsApp"
 BASE_URL = "https://api.chatapp.online"
