@@ -19,6 +19,7 @@ import logging
 import pandas as pd
 # Regex
 import re
+from rapidfuzz import fuzz
 
 
 logging.basicConfig(
@@ -34,7 +35,7 @@ ws_instance = None
 ws_thread = None
 
 # Constants related to ChatApp's API
-CREDENTIALS_FILE = "sensitive_info/credentials_chatapp.json"
+CREDENTIALS_FILE = "sensitive_info/credentials/chatapp_request.json"
 LICENSE_ID = 55570
 MESSENGER_TYPE = "caWhatsApp"
 BASE_URL = "https://api.chatapp.online"
@@ -47,7 +48,7 @@ ACCESS_TOKEN_END_TIME = None
 pusher_instance = None
 
 # Warning message to send to whoever sent the file.
-WARNING = "As per CBUAE regulations, file sharing is not permitted on this platform. Kindly delete the message with the attachment. Please note that the message should be deleted for everyone."
+WARNING = "As per CBUAE regulations, no personal information can be shared on this platform including sharing files. Kindly delete the message. Please note that the message should be deleted for everyone."
 
 # Mail related details
 SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
@@ -147,7 +148,6 @@ def fetch_new_tokens():
 
 
 def refresh_tokens():
-    """Refresh the token pair using the refreshToken. Used for ongoing renewal."""
     global REFRESH_TOKEN
     response = requests.post(
         f"{BASE_URL}/v1/tokens/refresh",
@@ -164,6 +164,9 @@ def refresh_tokens():
         )
         logging.info("Tokens refreshed successfully.")
         return True
+    elif response.status_code == 403:
+        logging.warning("Refresh token invalid or expired — fetching new tokens with credentials...")
+        return fetch_new_tokens()
     else:
         logging.error(f"Failed to refresh tokens: {response.status_code} — {response.text}")
         return False
@@ -325,8 +328,8 @@ def reconnect_websocket():
 
 def gmail_authenticate():
     creds = None
-    token_path = "sensitive_info/token.json"
-    cred_path = "sensitive_info/credentials.json"
+    token_path = "sensitive_info/credentials/email_token.json"
+    cred_path = "sensitive_info/credentials/email.json"
     
     # Load existing token if available
     if os.path.exists(token_path):
@@ -405,6 +408,23 @@ def flag_text(text: str) -> tuple[bool, list[str]]:
         if keyword.lower() in text_lower:
             found.append(f"Keyword: '{keyword}'")
 
+    # ── Fuzzy Keyword Matching ────────────────────────────────────────────────
+    if not found:  # only run fuzzy if exact matching found nothing
+        FUZZY_THRESHOLD = 85
+        words = text_lower.split()
+
+        for keyword in keywords:
+            keyword_word_count = len(keyword.split())
+            for i in range(len(words) - keyword_word_count + 1):
+                window = " ".join(words[i:i + keyword_word_count])
+                score = fuzz.ratio(window, keyword.lower())
+                if score >= FUZZY_THRESHOLD:
+                    found.append(f"Fuzzy Match: '{window}' ~ '{keyword}' ({score:.0f}%)")
+                    break
+
+
+    # Implement fuzzy search.
+
     # ── Regex Patterns ────────────────────────────────────────────────────────
     patterns = {
         "UAE Mobile Number": r"\+?971\s?5[0-9]\s?\d{3}\s?\d{4}",
@@ -433,6 +453,43 @@ def flag_text(text: str) -> tuple[bool, list[str]]:
         return True, found
     return False, []
 
+def get_employee_name(client_num: str) -> str:
+    BITRIX_WEBHOOK = ""
+    try:
+        response = requests.post(
+            url=f"{BITRIX_WEBHOOK}/crm.contact.list",
+            json={
+                "select": ["ID", "NAME", "LAST_NAME", "ASSIGNED_BY_ID", "PHONE"],
+                "filter": {
+                    "PHONE": client_num
+                }
+            }
+        )
+        contacts = response.json().get("result", [])
+        if not contacts:
+            logging.info(f"No contact found for {client_num}")
+            return ""
+        
+        assigned_by_id = contacts[0].get("ASSIGNED_BY_ID")
+        logging.info(assigned_by_id)
+
+        employee_response = requests.post(
+            url=f"{BITRIX_WEBHOOK}/user.get",
+            json={
+                "filter": {"ID": assigned_by_id},
+                "select": ["NAME", "LAST_NAME", "EMAIL"]
+            }
+        )
+        users = employee_response.json().get("result", [])
+        if not users:
+            return ""
+        
+        user = users[0]
+        return f"{user.get('NAME')} {user.get('LAST_NAME')}"
+
+    except Exception as e:
+        logging.error(f"Error getting employee name: {e}")
+        return ""
 
 def send_warning(license_id, messenger_type, chat_id, warning_text) -> tuple[bool, float]:
     """
@@ -448,7 +505,7 @@ def send_warning(license_id, messenger_type, chat_id, warning_text) -> tuple[boo
     try:
         response = requests.post(url, headers=headers, json=payload)
         if response.ok:
-            time_sent = time.time()
+            time_sent = time.strftime("%Y-%m-%d %H:%M:%S")
             logging.info(f"Warning sent to chat {chat_id}.")
             return True, time_sent
         else:
@@ -457,67 +514,57 @@ def send_warning(license_id, messenger_type, chat_id, warning_text) -> tuple[boo
     except requests.RequestException as e:
         logging.error(f"Network error when sending warning to {chat_id} : {e}.")
 
-def send_notification(chat_id, message_id, side, name, phone, messenger_type, 
+def send_notification(chat_id, message_id, side, name, phone, messenger_type, employee_name="",
                       has_attachment=False, text_flagged=False, reasons=None) -> bool:
     """
     Sends a notification through mail with the necessary details.
     """
     try:
         service = gmail_authenticate()
-
-        # Build the email content
-        sender = "ronakpunjabi2@gmail.com" # the gmail account you're sending from
         side_label = "Client" if side == "in" else "Employee"
         if has_attachment:
             subject = "File Sharing Violation Detected"
             body = f"""
-A message with an attachment was detected and deleted.
-
+A message with an attachment was detected.
 Details:
 - Sent by: {name} | {side_label}
 - Phone: {phone}
-- Chat ID: {chat_id}
+- Handled by: {employee_name}
+- Chat ID (Client's Number): {chat_id}
 - Message ID: {message_id}
 - Messenger: {messenger_type}
 - Time: {time.strftime("%Y-%m-%d %H:%M:%S")}
-                    """
-
+            """
         elif text_flagged:
             subject = "Message Flagged"
             reasons_text = "\n".join(f"  - {r}" for r in (reasons or []))
             body = f"""
-    A message has been flagged for the following reasons:
-
-    {reasons_text}
-
-    Details:
-    - Sent by: {name} | {side_label}
-    - Phone: {phone}
-    - Chat ID: {chat_id}
-    - Message ID: {message_id}
-    - Messenger: {messenger_type}
-    - Time: {time.strftime("%Y-%m-%d %H:%M:%S")}
+A message has been flagged for the following reasons:
+{reasons_text}
+Details:
+- Sent by: {name} | {side_label}
+- Phone: {phone}
+- Handled by: {employee_name}
+- Chat ID (Client's Number): {chat_id}
+- Message ID: {message_id}
+- Messenger: {messenger_type}
+- Time: {time.strftime("%Y-%m-%d %H:%M:%S")}
             """
-
         message = MIMEText(body)
         message["to"] = NOTIFICATION_EMAIL_TO
-        message["from"] = sender
+        message["from"] = NOTIFICATION_EMAIL
         message["subject"] = subject
-
-        # Encode and send
         encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
         send_result = service.users().messages().send(
             userId="me",
             body={"raw": encoded_message}
         ).execute()
-
         logging.info(f"Notification email sent. Message ID: ({send_result['id']})")
         return True
     
     except Exception as e:
         logging.error(f"Failed to send notification email: {e}")
         return False
-
 
 def handle_message(data):
     """
@@ -538,10 +585,18 @@ def handle_message(data):
             chat_id = message.get("chat", {}).get("id")
             side = message.get("side")
             has_file = message.get("message", {}).get("file") is not None
+            from_api = message.get("fromApi")
             text = message.get("message", {}).get("text")
+            if from_api or text == WARNING:
+                continue
             from_user = message.get("fromUser", {})
             name = from_user.get("name")
-            phone = from_user.get("phone")
+            phone = "+" + from_user.get("phone")
+            if side == "in":
+                employee_name = get_employee_name(phone)
+            elif side == "out":
+                client_num = "+" + chat_id
+                employee_name = get_employee_name(client_num)
 
             
             if not has_file:
@@ -550,7 +605,7 @@ def handle_message(data):
                     logging.warning(f"Message flagged — reasons: {reasons}")
                     send_notification(
                         chat_id, message_id, side, name, phone,
-                        messenger_type, has_attachment=False,
+                        messenger_type, employee_name, has_attachment=False,
                         text_flagged=True, reasons=reasons
                     )
                 return
@@ -562,13 +617,14 @@ def handle_message(data):
 
             # Send a warning message back to whoever sent the file along with a
             # notification to a mail id.
-            notification_sent = send_notification(chat_id, message_id, side, name, phone, messenger_type, has_file)
+            notification_sent = send_notification(chat_id, message_id, side, name, phone, messenger_type, employee_name, has_file)
             warning_sent, time_sent = send_warning(license_id, messenger_type, chat_id, WARNING)
 
             if warning_sent:
                 log = {
-                    "Sender's Name": name,
+                    "Sender's Name": name if side == "in" else employee_name,
                     "Sender's Number": phone,
+                    "Handled By" : employee_name,
                     "ChatID": chat_id,
                     "Warning Sent": warning_sent,
                     "Time Warning was Sent": time_sent if warning_sent else None,
@@ -576,7 +632,7 @@ def handle_message(data):
                 }
 
                 try:
-                    log_path = "sensitive_info/logs.csv"
+                    log_path = "sensitive_info/logs/incoming_log.csv" if side == "in" else "sensitive_info/logs/outgoing_log.csv"
                     log = pd.DataFrame([log])
                     if os.path.exists(log_path):
                         old_log = pd.read_csv(log_path)
@@ -586,6 +642,7 @@ def handle_message(data):
                         log.to_csv(log_path, index=False)
                 except Exception as e:
                     logging.error(f"Couldn't log message due to error: {e}")
+
 
     except Exception as e:
         logging.error(f"Error processing message event: {e}")
