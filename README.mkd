@@ -300,6 +300,3 @@ Find the `send_notification` method inside `GmailClient` and edit the `subject` 
 Update `NOTIFICATION_FROM` and `NOTIFICATION_TO` near the top of the script. If you change the sending account (`NOTIFICATION_FROM`), you will also need to redo the Gmail API credentials setup (steps 5 and 6 above) with the new account.
 
 ---
-
-*Made by: Ronak Punjabi*
-*Given to: Harish Daswani*
