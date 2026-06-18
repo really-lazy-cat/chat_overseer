@@ -363,67 +363,72 @@ class BitrixClient:
             return ""
 
     def delete_file_messages(self, lead_id: int, event_timestamp: int) -> bool:
-        """Batch fetch chat + messages, then delete any with files after event_timestamp."""
-        try:
-            response = requests.post(
-                url=f"{self.webhook}/batch",
-                json={
-                    "halt": 1,
-                    "cmd": {
-                        "get_chat": {
-                            "method": "imopenlines.crm.chat.get",
-                            "params": {
-                                "CRM_ENTITY_TYPE": "lead",
-                                "CRM_ENTITY": lead_id,
-                                "ACTIVE_ONLY": "N"
-                            }
-                        },
-                        "get_messages": {
-                            "method": "im.dialog.messages.get",
-                            "params": {
-                                "DIALOG_ID": "chat$result[get_chat][0][CHAT_ID]",
-                                "LIMIT": 20
-                            }
-                        }
+            """Fetch chat, then messages, and delete any with files after event_timestamp using sequential requests."""
+            try:
+                # Get the chat ID for the lead
+                chat_response = requests.post(
+                    url=f"{self.webhook}/imopenlines.crm.chat.get",
+                    json={
+                        "CRM_ENTITY_TYPE": "lead",
+                        "CRM_ENTITY": lead_id,
+                        "ACTIVE_ONLY": "N"
                     }
-                }
-            )
-
-            results  = response.json().get("result", {}).get("result", {})
-            chats    = results.get("get_chat", [])
-            messages = results.get("get_messages", {}).get("messages", [])
-
-            if not chats:
-                logging.info(f"No chat found for lead {lead_id}")
-                return False
-            if not messages:
-                logging.info("No messages found in chat")
-                return False
-
-            deleted_any = False
-            for message in messages:
-                if not message.get("params", {}).get("FILE_ID"):
-                    continue
-                msg_time = datetime.fromisoformat(message.get("date")).timestamp()
-                if msg_time < event_timestamp - 10:
-                    continue
-                msg_id = message.get("id")
-                r = requests.post(
-                    url=f"{self.webhook}/im.message.delete",
-                    json={"MESSAGE_ID": msg_id}
                 )
-                if r.ok:
-                    logging.info(f"Deleted Bitrix message {msg_id}.")
-                    deleted_any = True
-                else:
-                    logging.error(f"Failed to delete Bitrix message {msg_id}: {r.text}")
+                chat_response.raise_for_status()
+                chats = chat_response.json().get("result", [])
+                
+                if not chats:
+                    logging.info(f"No chat found for lead {lead_id}")
+                    return False
+                
+                # Safely grab the CHAT_ID from the first chat object
+                chat_id = chats[0].get("CHAT_ID")
+                if not chat_id:
+                    logging.info(f"Chat data structure malformed for lead {lead_id}")
+                    return False
 
-            return deleted_any
+                # Get the messages using the dialog ID format "chat{CHAT_ID}"
+                messages_response = requests.post(
+                    url=f"{self.webhook}/im.dialog.messages.get",
+                    json={
+                        "DIALOG_ID": f"chat{chat_id}",
+                        "LIMIT": 20
+                    }
+                )
+                messages_response.raise_for_status()
+                messages = messages_response.json().get("result", {}).get("messages", [])
+                
+                if not messages:
+                    logging.info(f"No messages found in chat {chat_id}")
+                    return False
 
-        except Exception as e:
-            logging.error(f"Error deleting Bitrix file messages: {e}")
-            return False
+                # Process and delete messages containing files
+                deleted_any = False
+                for message in messages:
+                    if not message.get("params", {}).get("FILE_ID"):
+                        continue
+                    
+                    msg_time = datetime.fromisoformat(message.get("date")).timestamp()
+                    if msg_time < event_timestamp - 10:
+                        continue
+                    
+                    msg_id = message.get("id")
+                    r = requests.post(
+                        url=f"{self.webhook}/im.message.delete",
+                        json={"MESSAGE_ID": msg_id}
+                    )
+                    
+                    if r.ok:
+                        logging.info(f"Deleted Bitrix message {msg_id}.")
+                        deleted_any = True
+                    else:
+                        logging.error(f"Failed to delete Bitrix message {msg_id}: {r.text}")
+                        
+                return deleted_any
 
+            except Exception as e:
+                logging.error(f"Error deleting Bitrix file messages: {e}")
+                return False
 
 # ══════════════════════════════════════════════════════════════════════════════
 # FACADE 3 — Gmail
