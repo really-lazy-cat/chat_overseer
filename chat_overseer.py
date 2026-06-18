@@ -500,11 +500,31 @@ Details:
             msg["from"]     = NOTIFICATION_FROM
             msg["subject"]  = subject
             encoded         = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-            result          = self.service.users().messages().send(
-                userId="me", body={"raw": encoded}
-            ).execute()
-            logging.info(f"Notification sent. Gmail ID: {result['id']}")
-            return True
+
+            # --- Retry Configuration ---
+            max_attempts = 3
+            retry_delay = 2  # base delay in seconds
+
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    result = self.service.users().messages().send(
+                        userId="me", body={"raw": encoded}
+                    ).execute()
+                    
+                    logging.info(f"Notification sent on attempt {attempt}. Gmail ID: {result['id']}")
+                    return True
+                    
+                except Exception as net_err:
+                    logging.warning(
+                        f"Attempt {attempt}/{max_attempts} failed to send Gmail notification: {net_err}"
+                    )
+                    if attempt == max_attempts:
+                        # Re-raise the error if we are out of tries, letting the outer block catch it
+                        raise net_err
+                    
+                    # Wait before retrying (exponential backoff: 2s, then 4s)
+                    sleep_time = retry_delay * attempt
+                    time.sleep(sleep_time)
 
         except Exception as e:
             logging.error(f"Failed to send notification: {e}")
