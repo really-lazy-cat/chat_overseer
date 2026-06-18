@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 from typing import Optional
 from rapidfuzz import fuzz
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -186,6 +188,18 @@ class ChatAppClient:
         self.refresh_token: Optional[str] = None
         self.token_end_time: Optional[int] = None
         self._email = self._password = self._app_id = None
+        
+        # ── Set up resilient session for ChatApp ───────────────────────────
+        self.session = requests.Session()
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,  # Waits 1s, 2s, 4s between retries
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["POST"]
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
     # ── Credentials ───────────────────────────────────────────────────────────
 
@@ -243,7 +257,7 @@ class ChatAppClient:
         logging.info("Tokens saved.")
 
     def fetch_new_tokens(self) -> bool:
-        response = requests.post(
+        response = self.session.post(
             f"{self.base_url}/v1/tokens",
             headers={"Content-Type": "application/json"},
             json={"email": self._email, "password": self._password, "appId": self._app_id}
@@ -256,7 +270,7 @@ class ChatAppClient:
         return False
 
     def refresh_tokens(self) -> bool:
-        response = requests.post(
+        response = self.session.post(
             f"{self.base_url}/v1/tokens/refresh",
             headers={"Content-Type": "application/json"},
             json={"refreshToken": self.refresh_token}
@@ -280,7 +294,7 @@ class ChatAppClient:
     # ── API Calls ─────────────────────────────────────────────────────────────
 
     def authenticate_channel(self, socket_id: str, channel_name: str) -> Optional[str]:
-        response = requests.post(
+        response = self.session.post(
             f"{self.base_url}/broadcasting/auth",
             headers={"Authorization": self.access_token, "Content-Type": "application/json"},
             json={"socket_id": socket_id, "channel_name": channel_name}
@@ -293,7 +307,7 @@ class ChatAppClient:
     def send_warning(self, license_id: int, messenger_type: str, chat_id: str, text: str) -> tuple[bool, str]:
         url = f"{self.base_url}/v1/licenses/{license_id}/messengers/{messenger_type}/chats/{chat_id}/messages/text"
         try:
-            response = requests.post(
+            response = self.session.post(
                 url,
                 headers={"Authorization": self.access_token, "Content-Type": "application/json"},
                 json={"text": text}
@@ -315,12 +329,28 @@ class ChatAppClient:
 
 class BitrixClient:
     def __init__(self, webhook: str):
-        self.webhook = webhook
+        # 1. Strip the trailing slash to prevent the '//' bug
+        self.webhook = webhook.rstrip('/')
+        
+        # 2. Create a session with a retry strategy for network/DNS glitches
+        self.session = requests.Session()
+        
+        # This will retry up to 3 times, backing off automatically
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,  # Waits 1s, 2s, 4s between retries
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["POST"]
+        )
+        
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
     def get_lead_info(self, client_num: str) -> tuple[Optional[int], str, str]:
         """Returns (lead_id, employee_name, employee_email) for a client phone number."""
         try:
-            response = requests.post(
+            response = self.session.post(
                 url=f"{self.webhook}/crm.item.list",
                 json={
                     "entityTypeId": 1,
@@ -336,7 +366,7 @@ class BitrixClient:
             lead_id        = items[0].get("id")
             assigned_by_id = items[0].get("assignedById")
 
-            emp = requests.post(
+            emp = self.session.post(
                 url=f"{self.webhook}/user.get",
                 json={"filter": {"ID": assigned_by_id}, "select": ["NAME", "LAST_NAME", "EMAIL"]}
             )
@@ -366,7 +396,7 @@ class BitrixClient:
             """Fetch chat, then messages, and delete any with files after event_timestamp using sequential requests."""
             try:
                 # Get the chat ID for the lead
-                chat_response = requests.post(
+                chat_response = self.session.post(
                     url=f"{self.webhook}/imopenlines.crm.chat.get",
                     json={
                         "CRM_ENTITY_TYPE": "lead",
@@ -388,7 +418,7 @@ class BitrixClient:
                     return False
 
                 # Get the messages using the dialog ID format "chat{CHAT_ID}"
-                messages_response = requests.post(
+                messages_response = self.session.post(
                     url=f"{self.webhook}/im.dialog.messages.get",
                     json={
                         "DIALOG_ID": f"chat{chat_id}",
@@ -413,7 +443,7 @@ class BitrixClient:
                         continue
                     
                     msg_id = message.get("id")
-                    r = requests.post(
+                    r = self.session.post(
                         url=f"{self.webhook}/im.message.delete",
                         json={"MESSAGE_ID": msg_id}
                     )
