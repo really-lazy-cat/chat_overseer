@@ -1,1 +1,305 @@
-Oversees chats :)
+# Chat Overseer Documentation
+
+## Overview
+
+Chat Overseer is a script that monitors your company's WhatsApp chat platform (ChatApp) in real time. Every time a message is sent or received, it automatically scans it for sensitive information such as personal IDs, payment details, or file attachments. If something is flagged, it takes action: sending a warning to the chat, notifying the team by email, deleting the message from Bitrix, and logging the incident.
+
+---
+
+## How Does It Work?
+
+### Non-Technical Summary
+
+The script runs continuously in the background, listening to every incoming and outgoing message on your ChatApp account via a live connection. When a message arrives, it goes through four checks in order:
+
+1. **Does it contain a file attachment?**
+2. **Does it contain sensitive keywords** (e.g. "passport", "IBAN", "credit card")?
+3. **Does it match a known sensitive pattern** (e.g. a UAE mobile number, Emirates ID number)?
+4. **Does it contain a URL** (especially a payment link)?
+
+If a message passes all four checks without being flagged, it is ignored. If it is flagged:
+
+- **File attachment detected:** A warning message is sent to the chat asking the sender to delete it. A notification email is sent to the team. The message is deleted from Bitrix. The incident is logged to a CSV file.
+- **Sensitive text detected (no file):** A notification email is sent to the team. No warning is sent, no deletion occurs.
+
+The script also runs a background process to keep its connection tokens fresh, and automatically reconnects if the connection drops.
+
+---
+
+### Technical Summary
+
+The script is structured around four main components:
+
+**1. Three API Facades**
+- `ChatAppClient`: Handles authentication (credentials + token management), channel subscription via Pusher WebSocket, and sending warning messages
+- `BitrixClient`: Looks up lead and employee info by phone number, fetches chat/message IDs, and deletes flagged messages
+- `GmailClient`: Authenticates via OAuth2 and sends notification emails
+
+**2. Chain of Responsibility (checking pipeline)**
+
+Each incoming message is passed through a chain of handlers in order. The chain short-circuits as soon as a flag is raised:
+
+```
+FileHandler → KeywordHandler → RegexHandler → URLHandler
+```
+
+- `FileHandler`: Checks the `has_file` boolean from the message payload
+- `KeywordHandler`: First does exact substring matching against the `KEYWORDS` list, then falls back to fuzzy matching via `rapidfuzz` (Levenshtein distance, threshold: 85%)
+- `RegexHandler`: Runs UAE-specific regex patterns (mobile number, Emirates ID, IBAN, email address, plate number)
+- `URLHandler`: Flags payment domain URLs (e.g. payfort, stripe) and any other URLs
+
+**3. Strategy Pattern (violation resolution)**
+
+Once a flag is raised, the appropriate strategy is selected:
+- `FileViolationStrategy`: Sends warning + email notification + deletes from Bitrix + logs to CSV
+- `TextViolationStrategy`: Sends email notification only
+
+**4. WebSocket Manager**
+
+Maintains a persistent Pusher WebSocket connection to ChatApp. Runs a ping loop every 25 seconds to keep the connection alive. Auto-reconnects on close with a 5-second delay. Token expiry is checked every 30 minutes in a background thread; if fewer than 2 hours remain, tokens are refreshed and the WebSocket is reconnected.
+
+**Message Pipeline flow:**
+
+```
+WebSocket message received
+    ↓
+Parse payload → build MessageContext
+    ↓
+Skip if: fromApi=true OR text contains "CBUAE regulations"
+    ↓
+Enrich context: look up lead_id, employee_name, employee_email, employee_link from Bitrix
+    ↓
+Run through checking chain
+    ↓
+If flagged → resolve_strategy() → execute()
+```
+
+---
+
+## What Gets Ignored?
+
+The script skips the following messages automatically:
+
+- Messages sent via the API (`fromApi = true`), to avoid processing automated/system messages
+- Messages that contain the phrase "CBUAE regulations", these are the script's own warning messages
+
+---
+
+## What Gets Flagged?
+
+### Keywords
+A large list of insurance and personal data keywords including (but not limited to):
+- Identity: `passport`, `emirates id`, `eid`, `date of birth`
+- Vehicle: `plate number`, `chassis number`, `mulkiya`
+- Insurance: `policy number`, `claim number`, `premium`, `endorsement`
+- Financial: `iban`, `credit card`, `payment link`, `cheque number`
+- Medical: `medical card`, `pre-authorization`, `lab result`
+
+Fuzzy matching catches typos and near-matches (e.g. "pasport" matching "passport").
+
+### Regex Patterns
+| Pattern | Example |
+|---|---|
+| UAE Mobile Number | `+971 50 123 4567` |
+| Emirates ID | `784-1990-1234567-1` |
+| IBAN | `AE07 0331 2345 6789 0123 456` |
+| Email Address | `someone@example.com` |
+| UAE Plate Number | `plate: AB 12345` |
+
+### URLs
+- Payment domain URLs (network.ae, payfort.com, checkout.com, tap.company, stripe.com, paypal.com) are flagged as payment links
+- All other URLs are flagged as unrecognised URLs
+
+---
+
+## Notification Emails
+
+**For file violations:**
+- Subject: `File Sharing Violation Detected | [Employee Name]`
+- Includes: sender name, phone, employee handling the chat, chat ID, message ID, messenger type, time
+
+**For text violations:**
+- Subject: `Message Flagged`
+- Includes: flagging reasons, same details as above
+
+---
+
+## Logs
+
+Logs are only created for **file violations**, not text-only violations. They are stored as CSV files in `sensitive_info/logs/`:
+
+| File | Contents |
+|---|---|
+| `incoming_log.csv` | File violations from messages sent **by the client** |
+| `outgoing_log.csv` | File violations from messages sent **by the employee** |
+
+Each log entry contains:
+
+- Sender's Name
+- Sender's Number
+- Handled By
+- ChatID
+- Warning Sent
+- Time Warning was Sent
+- Notification Sent
+- Deleted From Bitrix
+- Time Deleted
+
+---
+
+## Setup and Installation
+
+### System Requirements
+
+**1. Python 3.10 or later**
+
+To install Python, search "Python install" and follow the official steps at [python.org](https://www.python.org/downloads/).
+
+**2. Enabling Script Execution (Windows only)**
+
+Search for "PowerShell" in the Start menu, open it, and run:
+```
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+---
+
+### Installation
+
+Go to the following link:
+```
+https://github.com/really-lazy-cat/chat-overseer
+```
+Click the button labelled **"<> Code"**, then click **"Download ZIP"**.
+
+Extract the ZIP file into your desired folder.
+
+---
+
+### Setup
+
+#### 1. Create the Virtual Environment
+
+Open a terminal in the project folder (right-click -> "Open in Terminal") and run:
+```
+python -m venv .overseer_venv
+```
+If this fails with "Python is not installed", revisit the System Requirements above.
+
+#### 2. Activate the Virtual Environment
+
+Run this command. Note that you must do this **every time before running the script**:
+```
+.overseer_venv/Scripts/activate.ps1
+```
+
+#### 3. Install Necessary Libraries
+
+With the virtual environment active, run:
+```
+pip install -r requirements.txt
+```
+If this fails with "pip is not installed", reinstall Python.
+
+#### 4. Fill In Required Constants
+
+Before running the script, open `chat_overseer_v4.py` and fill in the following values near the top of the file:
+
+| Constant | What to put here |
+|---|---|
+| `BITRIX_WEBHOOK` | Your Bitrix24 webhook URL |
+| `NOTIFICATION_FROM` | The Gmail address notifications are sent **from** |
+| `NOTIFICATION_TO` | The email address notifications are sent **to** |
+
+#### 5. Get the Gmail API Credentials
+
+Go to [https://console.cloud.google.com](https://console.cloud.google.com) and log in with the account you want to send notifications from.
+
+Search for **"Gmail API"** and enable it. Then go to the **Credentials** tab and create credentials:
+- Choose **OAuth Client ID**
+- Application Type: **Desktop App**
+- Name: anything you like
+
+Download the credentials as a JSON file, rename it to `email.json`, and place it in:
+```
+sensitive_info/credentials/email.json
+```
+
+#### 6. Set Up the Employee Links File
+
+Create a CSV file at `sensitive_info/employee_links.csv`. It should have two columns:
+- Column 1: Employee full name (exactly as it appears in Bitrix)
+- Column 2: A link for that employee (e.g. a Teams or email link)
+
+---
+
+### First Run: Credentials Prompts
+
+When you run the script for the first time, you will be prompted **twice**:
+
+**First prompt: ChatApp credentials:**
+
+You will be asked for:
+- Email/username of the ChatApp admin account
+- Password
+- App ID (found on the ChatApp dashboard)
+
+These are saved to `sensitive_info/credentials/chatapp_request.json` and will not be asked again.
+
+**Second prompt: Gmail access:**
+
+A browser window will open asking you to log in and grant the script access to send emails. Log in with the same Gmail account whose credentials file you placed in step 5. The access token will be saved to `sensitive_info/credentials/email_token.json`.
+
+---
+
+### Running the Script
+
+With the virtual environment active, run:
+```
+python chat_overseer_v4.py
+```
+
+The script will then run continuously, monitoring all messages. To stop it, press `Ctrl + C`.
+
+---
+
+## Making Changes
+
+### 1. Adding or Removing Keywords
+
+Find the `KEYWORDS` list near the top of the script (around line 60). Add or remove items from the list, keeping each keyword in quotes and separated by commas.
+
+### 2. Changing the Fuzzy Match Sensitivity
+
+Find the following line near the top of the script:
+```python
+FUZZY_THRESHOLD = 85
+```
+This is a percentage. 85 means a word must be at least 85% similar to a keyword to be flagged. Lower this number to catch more near-matches; raise it to reduce false positives.
+
+### 3. Adding or Removing Regex Patterns
+
+Find the `REGEX_PATTERNS` dictionary near the top of the script. Each entry is a label and a regex pattern. Add new ones in the same format, or remove existing ones.
+
+### 4. Adding or Removing Payment Domains
+
+Find the `PAYMENT_DOMAINS` list near the top of the script and add or remove domain strings as needed.
+
+### 5. Changing the Warning Message
+
+Find `FileViolationStrategy` in the script and look for the `warning_text` variable inside it. Edit the text as needed.
+
+> **Note:** Do not remove the phrase "CBUAE regulations" from the warning message. The script uses this phrase to identify and skip its own warning messages when scanning new messages. If you change it, find the line `if text and "CBUAE regulations" in text` in `MessagePipeline.process` and update it to match.
+
+### 6. Changing the Notification Email Content
+
+Find the `send_notification` method inside `GmailClient` and edit the `subject` or `body` variables inside it. There are two branches: one for file violations and one for text violations.
+
+### 7. Changing the Email Address Used
+
+Update `NOTIFICATION_FROM` and `NOTIFICATION_TO` near the top of the script. If you change the sending account (`NOTIFICATION_FROM`), you will also need to redo the Gmail API credentials setup (steps 5 and 6 above) with the new account.
+
+---
+
+*Made by: Ronak Punjabi*
+*Given to: Harish Daswani*

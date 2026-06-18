@@ -1,683 +1,947 @@
-# Libraries for ChatApp connection
+# ══════════════════════════════════════════════════════════════════════════════
+# IMPORTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+# WebSocket
 import websocket
 import ssl
 import certifi
+# HTTP
 import requests
-import json
-import threading
-# Libraries for Gmail connection
-import os
+# Gmail
 import base64
 from email.mime.text import MIMEText
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
-# Libraries for logging
-import time
-import logging
-import pandas as pd
-# Regex
+# Data
+import json
+import os
 import re
+import time
+import threading
+import logging
+from logging.handlers import RotatingFileHandler
+import pandas as pd
+from datetime import datetime
+from dataclasses import dataclass, field
+from abc import ABC, abstractmethod
+from typing import Optional
 from rapidfuzz import fuzz
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# LOGGING
+# ══════════════════════════════════════════════════════════════════════════════
+
+formatter = logging.Formatter(
+    fmt="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+
+file_handler = RotatingFileHandler(
+    filename="chat_overseer.log",
+    maxBytes=5 * 1024 * 1024,
+    backupCount=3
+)
+file_handler.setFormatter(formatter)
+
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(formatter)
+
 logging.basicConfig(
     level=logging.INFO,
-    format=f"%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[file_handler, console_handler]
 )
 
 
-# Constants related to Websocket
-SOCKET_URL = "wss://socket.chatapp.online:6001/app/ChatsAppApiProdKey?protocol=7&client=python&version=1.0"
+# ══════════════════════════════════════════════════════════════════════════════
+# CONSTANTS
+# ══════════════════════════════════════════════════════════════════════════════
 
-ws_instance = None
-ws_thread = None
+SOCKET_URL          = ""
+LICENSE_ID          = 0
+MESSENGER_TYPE      = "caWhatsApp"
+CHATAPP_BASE_URL    = "https://api.chatapp.online"
+CHATAPP_CREDS_FILE  = "sensitive_info/credentials/chatapp_request.json"
+CHATAPP_TOKENS_FILE = "sensitive_info/credentials/chatapp_tokens.json"
+BITRIX_WEBHOOK      = ""
+GMAIL_SCOPES        = ["https://www.googleapis.com/auth/gmail.send"]
+GMAIL_TOKEN_PATH    = "sensitive_info/credentials/email_token.json"
+GMAIL_CREDS_PATH    = "sensitive_info/credentials/email.json"
+NOTIFICATION_FROM   = ""
+NOTIFICATION_TO     = ""
+EMPLOYEE_LINKS_PATH = "sensitive_info/employee_links.csv"
+LOG_DIR             = "sensitive_info/logs"
 
-# Constants related to ChatApp's API
-CREDENTIALS_FILE = "sensitive_info/credentials/chatapp_request.json"
-LICENSE_ID = 55570
-MESSENGER_TYPE = "caWhatsApp"
-BASE_URL = "https://api.chatapp.online"
-TOKENS_FILE = "sensitive_info/chatapp_tokens.json"
-
-# Tokens
-ACCESS_TOKEN = None
-REFRESH_TOKEN = None
-ACCESS_TOKEN_END_TIME = None
-pusher_instance = None
-
-# Warning message to send to whoever sent the file.
-WARNING = "As per CBUAE regulations, no personal information can be shared on this platform including sharing files. Kindly delete the message. Please note that the message should be deleted for everyone."
-
-# Mail related details
-SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
-NOTIFICATION_EMAIL = "shjops@cosmosinsurance.com"  # email notifications are sent from
-NOTIFICATION_EMAIL_TO = "robin@cosmosinsurance.com" # email notifications are sent to 
-
-# Payment domains to flag
 PAYMENT_DOMAINS = [
-    "network.ae", "payfort.com", "checkout.com", "tap.company",
-    "stripe.com", "paypal.com"
+    "network.ae", "payfort.com", "checkout.com",
+    "tap.company", "stripe.com", "paypal.com"
 ]
 
+KEYWORDS = [
+    # Identity & Personal Data
+    "passport", "passport number", "emirates id", "emirates id number",
+    "eid", "national id", "visa number", "residence visa", "uid",
+    "unified number", "date of birth", "dob",
+    # Vehicle & Motor
+    "plate number", "plate no", "registration number", "reg number",
+    "chassis number", "chassis no", "vin", "vehicle registration",
+    "traffic file", "mulkiya",
+    # Insurance — Policy
+    "policy number", "policy no", "pol no", "cover note",
+    "certificate number", "certificate of insurance", "coi",
+    "endorsement number", "schedule", "premium", "deductible",
+    "excess", "renewal", "expiry date", "sum insured",
+    # Insurance — Claims
+    "claim number", "claim no", "clm", "survey number", "repair order",
+    "damage report", "accident report", "loss adjuster", "surveyor",
+    "reimbursement", "claim amount", "settlement", "approved", "rejected",
+    # Financial & Payment
+    "aed", "payment", "transfer", "bank account", "account number",
+    "iban", "card number", "credit card", "debit card", "cvv",
+    "invoice number", "receipt", "premium amount", "outstanding",
+    "balance due", "payment link", "cheque number", "pdc",
+    # Medical & Health
+    "member id", "medical card", "health card", "diagnosis",
+    "prescription", "hospital", "clinic", "pre-authorization", "pre-auth",
+    "lab result", "medical report", "treatment", "chronic",
+    "insurance card", "network", "tpa",
+    # Contact & Personal Information
+    "mobile number", "phone number", "email address", "home address",
+    "po box", "emirates post", "bank details", "salary",
+    "date of joining", "employee id", "staff id",
+    # Transaction & Reference Numbers
+    "request number", "ref no", "reference number", "transaction id",
+    "quote number", "application number", "file number", "case number",
+    "ticket number",
+    # High-Risk Phrases
+    "send me your", "please share your", "can you send", "attach",
+    "screenshot", "copy of", "scan of", "photo of your",
+    "image of", "forward", "resend", "processed",
+]
 
-# ChatApp Credentials
+REGEX_PATTERNS = {
+    "UAE Mobile Number": r"\+?971\s?5[0-9]\s?\d{3}\s?\d{4}",
+    "Emirates ID":       r"784-\d{4}-\d{7}-\d{1}",
+    "IBAN":              r"AE\d{2}\s?\d{3}\s?\d{16}",
+    "Email Address":     r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+    "UAE Plate Number":  r"(?i)(plate|reg|mulkiya|registration)[\s\S]{0,20}[A-Z]{1,2}\s?\d{1,5}",
+}
 
-def load_chatapp_credentials():
-    global EMAIL, PASSWORD, APP_ID
-    if os.path.exists(CREDENTIALS_FILE):
-        with open(CREDENTIALS_FILE, "r") as f:
-            data = json.load(f)
-        EMAIL = data["email"]
-        PASSWORD = data["password"]
-        APP_ID = data["appId"]
-        logging.info("ChatApp credentials loaded.")
-        return True
-    return False
-
-def save_chatapp_credentials(email, password, app_id):
-    global EMAIL, PASSWORD, APP_ID
-    EMAIL = email
-    PASSWORD = password
-    APP_ID = app_id
-    os.makedirs(os.path.dirname(CREDENTIALS_FILE), exist_ok=True)
-    with open(CREDENTIALS_FILE, "w") as f:
-        json.dump({"email": email, "password": password, "appId": app_id}, f)
-    logging.info("ChatApp credentials saved.")
-
-def prompt_and_save_chatapp_credentials():
-    print("ChatApp credentials not found. Please enter them below:")
-    email = input("Email: ")
-    password = input("Password: ")
-    app_id = input("App ID: ")
-    save_chatapp_credentials(email, password, app_id)
-
-
-# TOKENS
-
-def save_tokens(access_token, refresh_token, access_token_end_time, refresh_token_end_time):
-    global ACCESS_TOKEN, REFRESH_TOKEN, ACCESS_TOKEN_END_TIME
-    ACCESS_TOKEN = access_token
-    REFRESH_TOKEN = refresh_token
-    ACCESS_TOKEN_END_TIME = access_token_end_time
-    os.makedirs(os.path.dirname(TOKENS_FILE), exist_ok=True)
-    with open(TOKENS_FILE, "w") as f:
-        json.dump({
-            "accessToken": access_token,
-            "refreshToken": refresh_token,
-            "accessTokenEndTime": access_token_end_time,
-            "refreshTokenEndTime": refresh_token_end_time
-        }, f)
-    logging.info("Tokens saved.")
-
-
-def load_tokens():
-    global ACCESS_TOKEN, REFRESH_TOKEN, ACCESS_TOKEN_END_TIME
-    if os.path.exists(TOKENS_FILE):
-        with open(TOKENS_FILE, "r") as f:
-            data = json.load(f)
-        ACCESS_TOKEN = data["accessToken"]
-        REFRESH_TOKEN = data["refreshToken"]
-        ACCESS_TOKEN_END_TIME = data["accessTokenEndTime"]
-        logging.info("Tokens loaded from file.")
-        return True
-    return False
+FUZZY_THRESHOLD = 85
 
 
-def fetch_new_tokens():
-    """Get a brand new token pair using email/password. Used only on first run."""
-    response = requests.post(
-        f"{BASE_URL}/v1/tokens",
-        headers={"Content-Type": "application/json"},
-        json={"email": EMAIL, "password": PASSWORD, "appId": APP_ID}
-    )
-    if response.ok:
-        data = response.json()["data"]
-        save_tokens(
-            data["accessToken"],
-            data["refreshToken"],
-            data["accessTokenEndTime"],
-            data["refreshTokenEndTime"]
+# ══════════════════════════════════════════════════════════════════════════════
+# MESSAGE CONTEXT — data carrier passed through the whole pipeline
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class MessageContext:
+    message_id:     str
+    chat_id:        str
+    side:           str         # "in" | "out"
+    event_timestamp: int
+    has_file:       bool
+    text:           Optional[str]
+    name:           str
+    phone:          str
+    license_id:     int
+    messenger_type: str
+    lead_id:        Optional[int]   = None
+    employee_name:  str             = ""
+    employee_email: str             = ""
+    flag_reasons:   list            = field(default_factory=list)
+
+    @classmethod
+    def from_raw(cls, payload: dict, license_id: int, messenger_type: str) -> "MessageContext":
+        msg         = payload
+        from_user   = msg.get("fromUser", {})
+        phone_raw   = from_user.get("phone", "")
+        return cls(
+            message_id      = msg.get("id"),
+            chat_id         = msg.get("chat", {}).get("id"),
+            side            = msg.get("side"),
+            event_timestamp = msg.get("time"),
+            has_file        = msg.get("message", {}).get("file") is not None,
+            text            = msg.get("message", {}).get("text"),
+            name            = from_user.get("name"),
+            phone           = "+" + phone_raw if phone_raw else "",
+            license_id      = license_id,
+            messenger_type  = messenger_type,
         )
-        logging.info("New tokens fetched successfully.")
-        return True
-    else:
-        logging.error(f"Failed to fetch new tokens: {response.status_code} — {response.text}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FACADE 1 — ChatApp API
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ChatAppClient:
+    def __init__(self):
+        self.base_url       = CHATAPP_BASE_URL
+        self.creds_file     = CHATAPP_CREDS_FILE
+        self.tokens_file    = CHATAPP_TOKENS_FILE
+        self.access_token:  Optional[str] = None
+        self.refresh_token: Optional[str] = None
+        self.token_end_time: Optional[int] = None
+        self._email = self._password = self._app_id = None
+
+    # ── Credentials ───────────────────────────────────────────────────────────
+
+    def load_credentials(self) -> bool:
+        if os.path.exists(self.creds_file):
+            with open(self.creds_file) as f:
+                data = json.load(f)
+            self._email    = data["email"]
+            self._password = data["password"]
+            self._app_id   = data["appId"]
+            logging.info("ChatApp credentials loaded.")
+            return True
         return False
 
+    def save_credentials(self, email: str, password: str, app_id: str) -> None:
+        self._email = email; self._password = password; self._app_id = app_id
+        os.makedirs(os.path.dirname(self.creds_file), exist_ok=True)
+        with open(self.creds_file, "w") as f:
+            json.dump({"email": email, "password": password, "appId": app_id}, f)
+        logging.info("ChatApp credentials saved.")
 
-def refresh_tokens():
-    global REFRESH_TOKEN
-    response = requests.post(
-        f"{BASE_URL}/v1/tokens/refresh",
-        headers={"Content-Type": "application/json"},
-        json={"refreshToken": REFRESH_TOKEN}
-    )
-    if response.ok:
-        data = response.json()["data"]
-        save_tokens(
-            data["accessToken"],
-            data["refreshToken"],
-            data["accessTokenEndTime"],
-            data["refreshTokenEndTime"]
+    def prompt_credentials(self) -> None:
+        print("ChatApp credentials not found. Please enter them below:")
+        self.save_credentials(
+            email    = input("Email: ").strip(),
+            password = input("Password: ").strip(),
+            app_id   = input("App ID: ").strip(),
         )
-        logging.info("Tokens refreshed successfully.")
-        return True
-    elif response.status_code == 403:
-        logging.warning("Refresh token invalid or expired — fetching new tokens with credentials...")
-        return fetch_new_tokens()
-    else:
+
+    # ── Tokens ────────────────────────────────────────────────────────────────
+
+    def load_tokens(self) -> bool:
+        if os.path.exists(self.tokens_file):
+            with open(self.tokens_file) as f:
+                data = json.load(f)
+            self.access_token  = data["accessToken"]
+            self.refresh_token = data["refreshToken"]
+            self.token_end_time = data["accessTokenEndTime"]
+            logging.info("Tokens loaded from file.")
+            return True
+        return False
+
+    def _save_tokens(self, data: dict) -> None:
+        self.access_token   = data["accessToken"]
+        self.refresh_token  = data["refreshToken"]
+        self.token_end_time = data["accessTokenEndTime"]
+        os.makedirs(os.path.dirname(self.tokens_file), exist_ok=True)
+        with open(self.tokens_file, "w") as f:
+            json.dump({
+                "accessToken":        data["accessToken"],
+                "refreshToken":       data["refreshToken"],
+                "accessTokenEndTime": data["accessTokenEndTime"],
+                "refreshTokenEndTime":data["refreshTokenEndTime"],
+            }, f)
+        logging.info("Tokens saved.")
+
+    def fetch_new_tokens(self) -> bool:
+        response = requests.post(
+            f"{self.base_url}/v1/tokens",
+            headers={"Content-Type": "application/json"},
+            json={"email": self._email, "password": self._password, "appId": self._app_id}
+        )
+        if response.ok:
+            self._save_tokens(response.json()["data"])
+            logging.info("New tokens fetched.")
+            return True
+        logging.error(f"Failed to fetch tokens: {response.status_code} — {response.text}")
+        return False
+
+    def refresh_tokens(self) -> bool:
+        response = requests.post(
+            f"{self.base_url}/v1/tokens/refresh",
+            headers={"Content-Type": "application/json"},
+            json={"refreshToken": self.refresh_token}
+        )
+        if response.ok:
+            self._save_tokens(response.json()["data"])
+            logging.info("Tokens refreshed.")
+            return True
+        elif response.status_code == 403:
+            logging.warning("Refresh token expired — fetching new tokens...")
+            return self.fetch_new_tokens()
         logging.error(f"Failed to refresh tokens: {response.status_code} — {response.text}")
         return False
 
+    def ensure_tokens(self) -> bool:
+        if not self.load_tokens():
+            logging.info("No saved tokens — fetching new ones...")
+            return self.fetch_new_tokens()
+        return True
 
-def token_refresh_loop():
-    """
-    Background thread that checks token expiry every 30 minutes.
-    Refreshes proactively if less than 2 hours remain on the accessToken.
-    Also triggers a WebSocket reconnect after refreshing.
-    """
-    while True:
-        time.sleep(1800)  # check every 30 minutes
-        now = int(time.time())
-        time_remaining = ACCESS_TOKEN_END_TIME - now
-        logging.info(f"Token check — {time_remaining // 60} minutes remaining.")
+    # ── API Calls ─────────────────────────────────────────────────────────────
 
-        if time_remaining < 7200:  # less than 2 hours left
-            logging.info("Token expiring soon — refreshing...")
-            if refresh_tokens():
-                reconnect_websocket()
-
-
-
-# WEBSOCKET / PUSHER
-
-def send_ws(ws, event, data=None):
-    payload = json.dumps({"event": event, "data": data or {}})
-    ws.send(payload)
-
-
-def authenticate_channel(ws, socket_id, channel_name):
-    """Hit ChatApp's auth endpoint to get the auth signature for a private channel."""
-    response = requests.post(
-        "https://api.chatapp.online/broadcasting/auth",
-        headers={
-            "Authorization": ACCESS_TOKEN,
-            "Content-Type": "application/json"
-        },
-        json={
-            "socket_id": socket_id,
-            "channel_name": channel_name
-        }
-    )
-    if response.ok:
-        return response.json().get("auth")
-    else:
+    def authenticate_channel(self, socket_id: str, channel_name: str) -> Optional[str]:
+        response = requests.post(
+            f"{self.base_url}/broadcasting/auth",
+            headers={"Authorization": self.access_token, "Content-Type": "application/json"},
+            json={"socket_id": socket_id, "channel_name": channel_name}
+        )
+        if response.ok:
+            return response.json().get("auth")
         logging.error(f"Channel auth failed: {response.status_code} — {response.text}")
         return None
 
-def ping_loop(ws):
-    """Send Pusher application-level pings every 25 seconds to keep the connection alive."""
-    while True:
-        time.sleep(25)
+    def send_warning(self, license_id: int, messenger_type: str, chat_id: str, text: str) -> tuple[bool, str]:
+        url = f"{self.base_url}/v1/licenses/{license_id}/messengers/{messenger_type}/chats/{chat_id}/messages/text"
         try:
-            send_ws(ws, "pusher:ping")
-            logging.debug("Sent pusher:ping")
-        except Exception as e:
-            logging.error(f"Failed to send ping: {e}")
-            break
-
-def on_open(ws):
-    logging.info("WebSocket connection opened.")
-    # Start ping thread
-    ping_thread = threading.Thread(target=ping_loop, args=(ws,), daemon=True)
-    ping_thread.start()
-
-
-def on_message(ws, message):
-    try:
-        payload = json.loads(message)
-        event = payload.get("event")
-        data = payload.get("data")
-
-        # Parse nested data string if needed
-        if isinstance(data, str):
-            try:
-                data = json.loads(data)
-            except Exception:
-                pass
-
-        if event == "pusher:connection_established":
-            socket_id = data.get("socket_id")
-            logging.info(f"Connected — socket_id={socket_id}")
-
-            # Subscribe to private channel
-            channel_name = f"private-v1.licenses.{LICENSE_ID}.messengers.{MESSENGER_TYPE}"
-            auth = authenticate_channel(ws, socket_id, channel_name)
-            if auth:
-                send_ws(ws, "pusher:subscribe", {
-                    "channel": channel_name,
-                    "auth": auth
-                })
-
-        elif event == "pusher_internal:subscription_succeeded":
-            logging.info(f"Subscribed to channel: {payload.get('channel')}")
-
-        elif event == "pusher:ping":
-            # Respond to server pings immediately
-            send_ws(ws, "pusher:pong")
-            logging.debug("Responded to ping.")
-
-        elif event == "message":
-            handle_message(json.dumps(data))
-
-        elif event == "pusher:error":
-            logging.error(f"Pusher error: {data}")
-
-    except Exception as e:
-        logging.error(f"Error in on_message: {e}")
+            response = requests.post(
+                url,
+                headers={"Authorization": self.access_token, "Content-Type": "application/json"},
+                json={"text": text}
+            )
+            if response.ok:
+                time_sent = time.strftime("%Y-%m-%d %H:%M:%S")
+                logging.info(f"Warning sent to chat {chat_id}.")
+                return True, time_sent
+            logging.error(f"Failed to send warning: {response.status_code} — {response.text}")
+            return False, ""
+        except requests.RequestException as e:
+            logging.error(f"Network error sending warning: {e}")
+            return False, ""
 
 
-def on_error(ws, error):
-    logging.error(f"WebSocket error: {error}")
+# ══════════════════════════════════════════════════════════════════════════════
+# FACADE 2 — Bitrix API
+# ══════════════════════════════════════════════════════════════════════════════
 
+class BitrixClient:
+    def __init__(self, webhook: str):
+        self.webhook = webhook
 
-def on_close(ws, close_status_code, close_msg):
-    logging.warning(f"WebSocket closed — code={close_status_code}, msg={close_msg}. Reconnecting in 5 seconds...")
-    time.sleep(5)
-    start_websocket()
-
-
-def start_websocket():
-    global ws_instance, ws_thread
-    
-    ssl_context = ssl.create_default_context()
-    ssl_context.load_verify_locations(certifi.where())
-    
-    ws_instance = websocket.WebSocketApp(
-        SOCKET_URL,
-        on_open=on_open,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close
-    )
-    ws_thread = threading.Thread(
-        target=lambda: ws_instance.run_forever(
-            ping_interval=25,
-            ping_timeout=10,
-            sslopt={"context": ssl_context}
-        ),
-        daemon=True
-    )
-    ws_thread.start()
-    logging.info("WebSocket thread started.")
-
-
-def reconnect_websocket():
-    global ws_instance
-    logging.info("Reconnecting WebSocket with refreshed token...")
-    try:
-        ws_instance.close()
-    except Exception:
-        pass
-    time.sleep(2)
-    start_websocket()
-
-# GMAIL
-
-def gmail_authenticate():
-    creds = None
-    token_path = "sensitive_info/credentials/email_token.json"
-    cred_path = "sensitive_info/credentials/email.json"
-    
-    # Load existing token if available
-    if os.path.exists(token_path):
-        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
-    
-    # If no valid credentials, authenticate
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(cred_path, SCOPES)
-            creds = flow.run_local_server(port=0)
-        
-        # Save token for future runs
-        with open(token_path, "w") as token:
-            token.write(creds.to_json())
-    
-    return build("gmail", "v1", credentials=creds)
-
-
-def flag_text(text: str) -> tuple[bool, list[str]]:
-    """
-    Checks the text of the message for certain keywords and regex patterns.
-    Returns a tuple of (flagged: bool, reasons: list of what was found).
-    """
-    if not text:
-        return False, []
-
-    found = []
-    text_lower = text.lower().strip()
-
-    # ── Keywords ──────────────────────────────────────────────────────────────
-    keywords = [
-        # Identity & Personal Data
-        "passport", "passport number", "emirates id", "emirates id number",
-        "eid", "national id", "visa number", "residence visa", "uid",
-        "unified number", "date of birth", "dob",
-        # Vehicle & Motor
-        "plate number", "plate no", "registration number", "reg number",
-        "chassis number", "chassis no", "vin", "vehicle registration",
-        "traffic file", "mulkiya",
-        # Insurance — Policy
-        "policy number", "policy no", "pol no", "cover note",
-        "certificate number", "certificate of insurance", "coi",
-        "endorsement number", "schedule", "premium", "deductible",
-        "excess", "renewal", "expiry date", "sum insured",
-        # Insurance — Claims
-        "claim number", "claim no", "clm", "survey number", "repair order",
-        "damage report", "accident report", "loss adjuster", "surveyor",
-        "reimbursement", "claim amount", "settlement", "approved", "rejected",
-        # Financial & Payment
-        "aed", "payment", "transfer", "bank account", "account number",
-        "iban", "card number", "credit card", "debit card", "cvv",
-        "invoice number", "receipt", "premium amount", "outstanding",
-        "balance due", "payment link", "cheque number", "pdc",
-        # Medical & Health
-        "member id", "medical card", "health card", "diagnosis",
-        "prescription", "hospital", "clinic", "pre-authorization", "pre-auth",
-        "lab result", "medical report", "treatment", "chronic",
-        "insurance card", "network", "tpa",
-        # Contact & Personal Information
-        "mobile number", "phone number", "email address", "home address",
-        "po box", "emirates post", "bank details", "salary",
-        "date of joining", "employee id", "staff id",
-        # Transaction & Reference Numbers
-        "request number", "ref no", "reference number", "transaction id",
-        "quote number", "application number", "file number", "case number",
-        "ticket number",
-        # High-Risk Phrases
-        "send me your", "please share your", "can you send", "attach",
-        "screenshot", "copy of", "scan of", "photo of your",
-        "image of", "forward", "resend",
-    ]
-
-    for keyword in keywords:
-        if keyword.lower() in text_lower:
-            found.append(f"Keyword: '{keyword}'")
-
-    # ── Fuzzy Keyword Matching ────────────────────────────────────────────────
-    if not found:  # only run fuzzy if exact matching found nothing
-        FUZZY_THRESHOLD = 85
-        words = text_lower.split()
-
-        for keyword in keywords:
-            keyword_word_count = len(keyword.split())
-            for i in range(len(words) - keyword_word_count + 1):
-                window = " ".join(words[i:i + keyword_word_count])
-                score = fuzz.ratio(window, keyword.lower())
-                if score >= FUZZY_THRESHOLD:
-                    found.append(f"Fuzzy Match: '{window}' ~ '{keyword}' ({score:.0f}%)")
-                    break
-
-
-    # Implement fuzzy search.
-
-    # ── Regex Patterns ────────────────────────────────────────────────────────
-    patterns = {
-        "UAE Mobile Number": r"\+?971\s?5[0-9]\s?\d{3}\s?\d{4}",
-        "Emirates ID":       r"784-\d{4}-\d{7}-\d{1}",
-        "IBAN":              r"AE\d{2}\s?\d{3}\s?\d{16}",
-        "Email Address":     r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
-        "UAE Plate Number":  r"(?i)(plate|reg|mulkiya|registration)[\s\S]{0,20}[A-Z]{1,2}\s?\d{1,5}",
-    }
-
-    for label, pattern in patterns.items():
-        if re.search(pattern, text):
-            found.append(f"Pattern: {label}")
-
-    # ── Payment Links ─────────────────────────────────────────────────────────
-    urls = re.findall(r"https?://[^\s]+", text)
-    for url in urls:
-        for domain in PAYMENT_DOMAINS:
-            if domain in url:
-                found.append(f"Payment Link: {url}")
-                break
-        else:
-            # Flag any URL not on an approved list
-            found.append(f"URL detected: {url}")
-
-    if found:
-        return True, found
-    return False, []
-
-def get_employee_name(client_num: str) -> str:
-    BITRIX_WEBHOOK = ""
-    try:
-        response = requests.post(
-            url=f"{BITRIX_WEBHOOK}/crm.contact.list",
-            json={
-                "select": ["ID", "NAME", "LAST_NAME", "ASSIGNED_BY_ID", "PHONE"],
-                "filter": {
-                    "PHONE": client_num
+    def get_lead_info(self, client_num: str) -> tuple[Optional[int], str, str]:
+        """Returns (lead_id, employee_name, employee_email) for a client phone number."""
+        try:
+            response = requests.post(
+                url=f"{self.webhook}/crm.item.list",
+                json={
+                    "entityTypeId": 1,
+                    "select": ["ID", "ASSIGNED_BY_ID"],
+                    "filter": {"phone": client_num}
                 }
-            }
-        )
-        contacts = response.json().get("result", [])
-        if not contacts:
-            logging.info(f"No contact found for {client_num}")
+            )
+            items = response.json().get("result", {}).get("items", [])
+            if not items:
+                logging.info(f"No lead found for {client_num}")
+                return None, "", ""
+
+            lead_id        = items[0].get("id")
+            assigned_by_id = items[0].get("assignedById")
+
+            emp = requests.post(
+                url=f"{self.webhook}/user.get",
+                json={"filter": {"ID": assigned_by_id}, "select": ["NAME", "LAST_NAME", "EMAIL"]}
+            )
+            users = emp.json().get("result", [])
+            if not users:
+                return lead_id, "", ""
+
+            u = users[0]
+            return lead_id, f"{u.get('NAME')} {u.get('LAST_NAME')}", u.get("EMAIL", "")
+
+        except Exception as e:
+            logging.error(f"Error getting lead info: {e}")
+            return None, "", ""
+
+    def get_employee_link(self, employee_name: str) -> str:
+        try:
+            df = pd.read_csv(EMPLOYEE_LINKS_PATH)
+            match = df[df.iloc[:, 0] == employee_name]
+            if match.empty:
+                return ""
+            return match.iloc[0, 1]
+        except Exception as e:
+            logging.error(f"Error getting employee link: {e}")
             return ""
-        
-        assigned_by_id = contacts[0].get("ASSIGNED_BY_ID")
-        logging.info(assigned_by_id)
 
-        employee_response = requests.post(
-            url=f"{BITRIX_WEBHOOK}/user.get",
-            json={
-                "filter": {"ID": assigned_by_id},
-                "select": ["NAME", "LAST_NAME", "EMAIL"]
-            }
-        )
-        users = employee_response.json().get("result", [])
-        if not users:
-            return ""
-        
-        user = users[0]
-        return f"{user.get('NAME')} {user.get('LAST_NAME')}"
-
-    except Exception as e:
-        logging.error(f"Error getting employee name: {e}")
-        return ""
-
-def send_warning(license_id, messenger_type, chat_id, warning_text) -> tuple[bool, float]:
-    """
-    Sends a warning message to inform either that the message has been deleted, or that the message should be deleted.
-    """
-    url = f"{BASE_URL}/v1/licenses/{license_id}/messengers/{messenger_type}/chats/{chat_id}/messages/text"
-    headers = {
-        "Authorization" : ACCESS_TOKEN,
-        "Content-Type" : "application/json",
-    }
-    payload = {"text" : warning_text}
-
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        if response.ok:
-            time_sent = time.strftime("%Y-%m-%d %H:%M:%S")
-            logging.info(f"Warning sent to chat {chat_id}.")
-            return True, time_sent
-        else:
-            logging.info(f"Failed to send warning to chat {chat_id} : {response.status_code} - {response.text}")
-            return False, 0.0
-    except requests.RequestException as e:
-        logging.error(f"Network error when sending warning to {chat_id} : {e}.")
-
-def send_notification(chat_id, message_id, side, name, phone, messenger_type, employee_name="",
-                      has_attachment=False, text_flagged=False, reasons=None) -> bool:
-    """
-    Sends a notification through mail with the necessary details.
-    """
-    try:
-        service = gmail_authenticate()
-        side_label = "Client" if side == "in" else "Employee"
-        if has_attachment:
-            subject = "File Sharing Violation Detected"
-            body = f"""
-A message with an attachment was detected.
-Details:
-- Sent by: {name} | {side_label}
-- Phone: {phone}
-- Handled by: {employee_name}
-- Chat ID (Client's Number): {chat_id}
-- Message ID: {message_id}
-- Messenger: {messenger_type}
-- Time: {time.strftime("%Y-%m-%d %H:%M:%S")}
-            """
-        elif text_flagged:
-            subject = "Message Flagged"
-            reasons_text = "\n".join(f"  - {r}" for r in (reasons or []))
-            body = f"""
-A message has been flagged for the following reasons:
-{reasons_text}
-Details:
-- Sent by: {name} | {side_label}
-- Phone: {phone}
-- Handled by: {employee_name}
-- Chat ID (Client's Number): {chat_id}
-- Message ID: {message_id}
-- Messenger: {messenger_type}
-- Time: {time.strftime("%Y-%m-%d %H:%M:%S")}
-            """
-        message = MIMEText(body)
-        message["to"] = NOTIFICATION_EMAIL_TO
-        message["from"] = NOTIFICATION_EMAIL
-        message["subject"] = subject
-        encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
-        send_result = service.users().messages().send(
-            userId="me",
-            body={"raw": encoded_message}
-        ).execute()
-        logging.info(f"Notification email sent. Message ID: ({send_result['id']})")
-        return True
-    
-    except Exception as e:
-        logging.error(f"Failed to send notification email: {e}")
-        return False
-
-def handle_message(data):
-    """
-    Extracts the necessary details from any message sent or received, and handles what to do with it based on certain criteria.
-    """
-    try:
-        payload = json.loads(data)
-        inner = payload.get("payload", {})
-        meta = inner.get("meta", {})
-        messages = inner.get("data", [])
-
-        license_id = meta.get("license_Id", LICENSE_ID)
-        messenger_type = meta.get("messengerType", MESSENGER_TYPE)
-
-        for message in messages:
-            # Extract the needed information
-            message_id = message.get("id")
-            chat_id = message.get("chat", {}).get("id")
-            side = message.get("side")
-            has_file = message.get("message", {}).get("file") is not None
-            from_api = message.get("fromApi")
-            text = message.get("message", {}).get("text")
-            if from_api or text == WARNING:
-                continue
-            from_user = message.get("fromUser", {})
-            name = from_user.get("name")
-            phone = "+" + from_user.get("phone")
-            if side == "in":
-                employee_name = get_employee_name(phone)
-            elif side == "out":
-                client_num = "+" + chat_id
-                employee_name = get_employee_name(client_num)
-
-            
-            if not has_file:
-                text_flagged, reasons = flag_text(text)
-                if text_flagged:
-                    logging.warning(f"Message flagged — reasons: {reasons}")
-                    send_notification(
-                        chat_id, message_id, side, name, phone,
-                        messenger_type, employee_name, has_attachment=False,
-                        text_flagged=True, reasons=reasons
-                    )
-                return
-            
-            logging.warning(
-                f"File detected - message id=({message_id}), "
-                f"chat_id=({chat_id}), side={side}"
+    def delete_file_messages(self, lead_id: int, event_timestamp: int) -> bool:
+        """Batch fetch chat + messages, then delete any with files after event_timestamp."""
+        try:
+            response = requests.post(
+                url=f"{self.webhook}/batch",
+                json={
+                    "halt": 1,
+                    "cmd": {
+                        "get_chat": {
+                            "method": "imopenlines.crm.chat.get",
+                            "params": {
+                                "CRM_ENTITY_TYPE": "lead",
+                                "CRM_ENTITY": lead_id,
+                                "ACTIVE_ONLY": "N"
+                            }
+                        },
+                        "get_messages": {
+                            "method": "im.dialog.messages.get",
+                            "params": {
+                                "DIALOG_ID": "chat$result[get_chat][0][CHAT_ID]",
+                                "LIMIT": 20
+                            }
+                        }
+                    }
+                }
             )
 
-            # Send a warning message back to whoever sent the file along with a
-            # notification to a mail id.
-            notification_sent = send_notification(chat_id, message_id, side, name, phone, messenger_type, employee_name, has_file)
-            warning_sent, time_sent = send_warning(license_id, messenger_type, chat_id, WARNING)
+            results  = response.json().get("result", {}).get("result", {})
+            chats    = results.get("get_chat", [])
+            messages = results.get("get_messages", {}).get("messages", [])
 
-            if warning_sent:
-                log = {
-                    "Sender's Name": name if side == "in" else employee_name,
-                    "Sender's Number": phone,
-                    "Handled By" : employee_name,
-                    "ChatID": chat_id,
-                    "Warning Sent": warning_sent,
-                    "Time Warning was Sent": time_sent if warning_sent else None,
-                    "Notification Sent": notification_sent,
-                }
+            if not chats:
+                logging.info(f"No chat found for lead {lead_id}")
+                return False
+            if not messages:
+                logging.info("No messages found in chat")
+                return False
 
+            deleted_any = False
+            for message in messages:
+                if not message.get("params", {}).get("FILE_ID"):
+                    continue
+                msg_time = datetime.fromisoformat(message.get("date")).timestamp()
+                if msg_time < event_timestamp - 10:
+                    continue
+                msg_id = message.get("id")
+                r = requests.post(
+                    url=f"{self.webhook}/im.message.delete",
+                    json={"MESSAGE_ID": msg_id}
+                )
+                if r.ok:
+                    logging.info(f"Deleted Bitrix message {msg_id}.")
+                    deleted_any = True
+                else:
+                    logging.error(f"Failed to delete Bitrix message {msg_id}: {r.text}")
+
+            return deleted_any
+
+        except Exception as e:
+            logging.error(f"Error deleting Bitrix file messages: {e}")
+            return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FACADE 3 — Gmail
+# ══════════════════════════════════════════════════════════════════════════════
+
+class GmailClient:
+    def __init__(self):
+        self._service = None
+
+    def _authenticate(self) -> None:
+        creds = None
+        if os.path.exists(GMAIL_TOKEN_PATH):
+            creds = Credentials.from_authorized_user_file(GMAIL_TOKEN_PATH, GMAIL_SCOPES)
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(GMAIL_CREDS_PATH, GMAIL_SCOPES)
+                creds = flow.run_local_server(port=0)
+            with open(GMAIL_TOKEN_PATH, "w") as f:
+                f.write(creds.to_json())
+        self._service = build("gmail", "v1", credentials=creds)
+
+    @property
+    def service(self) -> None:
+        if not self._service:
+            self._authenticate()
+        return self._service
+
+    def send_notification(self, ctx: MessageContext, has_attachment: bool = False,
+                          reasons: Optional[list] = None) -> bool:
+        try:
+            side_label = "Client" if ctx.side == "in" else "Employee"
+            now        = time.strftime("%Y-%m-%d %H:%M:%S")
+
+            if has_attachment:
+                subject = f"File Sharing Violation Detected | {ctx.employee_name}"
+                body    = f"""
+A message with an attachment was detected.
+
+Details:
+- Sent by:               {ctx.name} | {side_label}
+- Phone:                 {ctx.phone}
+- Handled by:            {ctx.employee_name}
+- Chat ID:               {ctx.chat_id}
+- Message ID:            {ctx.message_id}
+- Messenger:             {ctx.messenger_type}
+- Time:                  {now}
+"""
+            else:
+                reasons_text = "\n".join(f"  - {r}" for r in (reasons or []))
+                subject      = "Message Flagged"
+                body         = f"""
+A message has been flagged for the following reasons:
+{reasons_text}
+
+Details:
+- Sent by:               {ctx.name} | {side_label}
+- Phone:                 {ctx.phone}
+- Handled by:            {ctx.employee_name}
+- Chat ID:               {ctx.chat_id}
+- Message ID:            {ctx.message_id}
+- Messenger:             {ctx.messenger_type}
+- Time:                  {now}
+"""
+
+            msg             = MIMEText(body)
+            msg["to"]       = NOTIFICATION_TO
+            msg["from"]     = NOTIFICATION_FROM
+            msg["subject"]  = subject
+            encoded         = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+            result          = self.service.users().messages().send(
+                userId="me", body={"raw": encoded}
+            ).execute()
+            logging.info(f"Notification sent. Gmail ID: {result['id']}")
+            return True
+
+        except Exception as e:
+            logging.error(f"Failed to send notification: {e}")
+            return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CHAIN OF RESPONSIBILITY — message checking pipeline
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class CheckResult:
+    flagged:  bool
+    reasons:  list
+    is_file:  bool
+
+
+class MessageHandler(ABC):
+    def __init__(self):
+        self._next: Optional["MessageHandler"] = None
+
+    def set_next(self, handler: "MessageHandler") -> "MessageHandler":
+        self._next = handler
+        return handler
+
+    def handle(self, ctx: MessageContext) -> Optional[CheckResult]:
+        if self._next:
+            return self._next.handle(ctx)
+        return None
+
+
+class FileHandler(MessageHandler):
+    """Flags messages that contain a file attachment."""
+    def handle(self, ctx: MessageContext) -> Optional[CheckResult]:
+        if ctx.has_file:
+            return CheckResult(flagged=True, reasons=["File attachment detected"], is_file=True)
+        return super().handle(ctx)
+
+
+class KeywordHandler(MessageHandler):
+    """Flags messages containing exact keyword matches."""
+    def handle(self, ctx: MessageContext) -> Optional[CheckResult]:
+        if not ctx.text:
+            return super().handle(ctx)
+
+        text_lower = ctx.text.lower().strip()
+        found      = [
+            f"Keyword: '{kw}'"
+            for kw in KEYWORDS
+            if kw.lower() in text_lower
+        ]
+
+        if found:
+            return CheckResult(flagged=True, reasons=found, is_file=False)
+
+        # Fuzzy fallback only if no exact match
+        words  = text_lower.split()
+        fuzzy_found = []
+        for kw in KEYWORDS:
+            kw_words = kw.split()
+            kw_count = len(kw_words)
+            for i in range(len(words) - kw_count + 1):
+                window = " ".join(words[i:i + kw_count])
+                score  = fuzz.ratio(window, kw.lower())
+                if score >= FUZZY_THRESHOLD:
+                    fuzzy_found.append(f"Fuzzy Match: '{window}' ~ '{kw}' ({score:.0f}%)")
+                    break
+
+        if fuzzy_found:
+            return CheckResult(flagged=True, reasons=fuzzy_found, is_file=False)
+
+        return super().handle(ctx)
+
+
+class RegexHandler(MessageHandler):
+    """Flags messages matching UAE-specific regex patterns."""
+    def handle(self, ctx: MessageContext) -> Optional[CheckResult]:
+        if not ctx.text:
+            return super().handle(ctx)
+
+        found = [
+            f"Pattern: {label}"
+            for label, pattern in REGEX_PATTERNS.items()
+            if re.search(pattern, ctx.text)
+        ]
+
+        if found:
+            return CheckResult(flagged=True, reasons=found, is_file=False)
+        return super().handle(ctx)
+
+
+class URLHandler(MessageHandler):
+    """Flags payment domain URLs and any unrecognised URLs."""
+    def handle(self, ctx: MessageContext) -> Optional[CheckResult]:
+        if not ctx.text:
+            return super().handle(ctx)
+
+        urls  = re.findall(r"https?://[^\s]+", ctx.text)
+        found = []
+        for url in urls:
+            if any(domain in url for domain in PAYMENT_DOMAINS):
+                found.append(f"Payment Link: {url}")
+            else:
+                found.append(f"URL detected: {url}")
+
+        if found:
+            return CheckResult(flagged=True, reasons=found, is_file=False)
+        return super().handle(ctx)
+
+
+def build_checking_chain() -> MessageHandler:
+    """Constructs and returns the full handler chain."""
+    file_handler    = FileHandler()
+    keyword_handler = KeywordHandler()
+    regex_handler   = RegexHandler()
+    url_handler     = URLHandler()
+
+    file_handler.set_next(keyword_handler)
+    keyword_handler.set_next(regex_handler)
+    regex_handler.set_next(url_handler)
+
+    return file_handler
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STRATEGY — action taken after flagging
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ViolationStrategy(ABC):
+    @abstractmethod
+    def execute(self, ctx: MessageContext, result: CheckResult,
+                chatapp: ChatAppClient, bitrix: BitrixClient, gmail: GmailClient):
+        pass
+
+
+class FileViolationStrategy(ViolationStrategy):
+    """Handles file violations: warn, notify, delete from Bitrix, log to CSV."""
+
+    def execute(self, 
+                ctx: MessageContext, 
+                result: CheckResult,
+                chatapp: ChatAppClient, 
+                bitrix: BitrixClient, 
+                gmail: GmailClient
+                ) -> None:
+
+        warning_text = (
+            f"As per CBUAE regulations, no personal information can be shared on this platform "
+            f"including sharing files. Kindly delete the message. Please note that the message "
+            f"should be deleted for everyone. For further communication, kindly contact "
+            f"{ctx.employee_name} on the following platforms:"
+            f" - Email: {ctx.employee_email}"
+            f" - Chat: {ctx.employee_link}"
+        )
+
+        notification_sent           = gmail.send_notification(ctx, has_attachment=True)
+        warning_sent, time_sent     = chatapp.send_warning(
+            ctx.license_id, ctx.messenger_type, ctx.chat_id, warning_text
+        )
+        if ctx.lead_id:
+            deleted = bitrix.delete_file_messages(ctx.lead_id, ctx.event_timestamp)
+
+        if warning_sent:
+            self._log(ctx, warning_sent, time_sent, notification_sent, deleted)
+
+    def _log(
+            self, 
+            ctx: MessageContext, 
+            warning_sent: bool,
+            time_sent: str, 
+            notification_sent: bool, 
+            deleted: bool
+            ) -> None:
+        log = {
+            "Sender's Name":         ctx.name if ctx.side == "in" else ctx.employee_name,
+            "Sender's Number":       ctx.phone,
+            "Handled By":            ctx.employee_name,
+            "ChatID":                ctx.chat_id,
+            "Warning Sent":          warning_sent,
+            "Time Warning was Sent": time_sent if warning_sent else None,
+            "Notification Sent":     notification_sent,
+            "Deleted From Bitrix":   deleted,
+            "Time Deleted" :         time.strftime("%Y-%m-%d %H:%M:%S") if deleted else None,
+        }
+        try:
+            log_path = os.path.join(
+                LOG_DIR,
+                "incoming_log.csv" if ctx.side == "in" else "outgoing_log.csv"
+            )
+            os.makedirs(LOG_DIR, exist_ok=True)
+            log_df = pd.DataFrame([log])
+            if os.path.exists(log_path):
+                old = pd.read_csv(log_path)
+                pd.concat([old, log_df], ignore_index=True).to_csv(log_path, index=False)
+            else:
+                log_df.to_csv(log_path, mode='a', header=not os.path.exists(log_path), index=False)
+        except Exception as e:
+            logging.error(f"Couldn't log violation: {e}")
+
+
+class TextViolationStrategy(ViolationStrategy):
+    """Handles text violations: notify only."""
+
+    def execute(self, ctx: MessageContext, result: CheckResult,
+                chatapp: ChatAppClient, bitrix: BitrixClient, gmail: GmailClient):
+        gmail.send_notification(ctx, has_attachment=False, reasons=result.reasons)
+
+
+def resolve_strategy(result: CheckResult) -> ViolationStrategy:
+    return FileViolationStrategy() if result.is_file else TextViolationStrategy()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WEBSOCKET MANAGER
+# ══════════════════════════════════════════════════════════════════════════════
+
+class WebSocketManager:
+    def __init__(self, chatapp: ChatAppClient, message_handler_fn):
+        self.chatapp            = chatapp
+        self.message_handler_fn = message_handler_fn
+        self._ws: Optional[websocket.WebSocketApp] = None
+        self._ssl_context       = ssl.create_default_context()
+        self._ssl_context.load_verify_locations(certifi.where())
+        self._lock              = threading.Lock()        
+        self._reconnecting      = False                  
+
+    def _send(self, ws, event: str, data=None) -> None:
+        ws.send(json.dumps({"event": event, "data": data or {}}))
+
+    def _ping_loop(self, ws) -> None:
+        while True:
+            time.sleep(25)
+            try:
+                if ws.sock and ws.sock.connected:
+                    self._send(ws, "pusher:ping")
+                    logging.debug("Sent pusher:ping")
+                else:
+                    break
+            except Exception as e:
+                logging.error(f"Failed to send ping: {e}")
+                break
+
+    def _on_open(self, ws) -> None:
+        logging.info("WebSocket connection opened.")
+        threading.Thread(target=self._ping_loop, args=(ws,), daemon=True).start()
+
+    def _on_message(self, ws, message) -> None:
+        try:
+            payload = json.loads(message)
+            event   = payload.get("event")
+            data    = payload.get("data")
+
+            if isinstance(data, str):
                 try:
-                    log_path = "sensitive_info/logs/incoming_log.csv" if side == "in" else "sensitive_info/logs/outgoing_log.csv"
-                    log = pd.DataFrame([log])
-                    if os.path.exists(log_path):
-                        old_log = pd.read_csv(log_path)
-                        new_log = pd.concat([old_log, log], axis=0, ignore_index=True)
-                        new_log.to_csv(log_path, index=False)
-                    else:
-                        log.to_csv(log_path, index=False)
-                except Exception as e:
-                    logging.error(f"Couldn't log message due to error: {e}")
+                    data = json.loads(data)
+                except Exception:
+                    pass
+
+            if event == "pusher:connection_established":
+                socket_id    = data.get("socket_id")
+                channel_name = f"private-v1.licenses.{LICENSE_ID}.messengers.{MESSENGER_TYPE}"
+                logging.info(f"Connected — socket_id={socket_id}")
+                auth = self.chatapp.authenticate_channel(socket_id, channel_name)
+                if auth:
+                    self._send(ws, "pusher:subscribe", {"channel": channel_name, "auth": auth})
+
+            elif event == "pusher_internal:subscription_succeeded":
+                logging.info(f"Subscribed to channel: {payload.get('channel')}")
+
+            elif event == "pusher:ping":
+                self._send(ws, "pusher:pong")
+
+            elif event == "message":
+                self.message_handler_fn(json.dumps(data))
+
+            elif event == "pusher:error":
+                logging.error(f"Pusher error: {data}")
+
+        except Exception as e:
+            logging.error(f"Error in on_message: {e}")
+
+    def _on_error(self, ws, error) -> None:
+        logging.error(f"WebSocket error: {error}")
+
+    def _on_close(self, ws, code, msg) -> None:
+        logging.warning(f"WebSocket closed — code={code}. Reconnecting in 5 seconds...")
+        time.sleep(5)
+        self.reconnect()
+
+    def start(self):
+        with self._lock:
+            self._ws = websocket.WebSocketApp(
+                SOCKET_URL,
+                on_open    = self._on_open,
+                on_message = self._on_message,
+                on_error   = self._on_error,
+                on_close   = self._on_close,
+            )
+            threading.Thread(
+                target=lambda: self._ws.run_forever(
+                    ping_interval=25,
+                    ping_timeout=10,
+                    sslopt={"context": self._ssl_context}
+                ),
+                daemon=True
+            ).start()
+            logging.info("WebSocket thread started.")
+
+    def reconnect(self) -> None:
+        with self._lock:
+            if self._reconnecting:
+                logging.info("Reconnect already in progress, skipping.")
+                return
+            self._reconnecting = True
+
+        logging.info("Reconnecting WebSocket...")
+        try:
+            self._ws.close()
+        except Exception:
+            pass
+        time.sleep(2)
+        self.start()
+
+        with self._lock:
+            self._reconnecting = False
+
+    def close(self) -> None:
+        if self._ws:
+            self._ws.close()
 
 
-    except Exception as e:
-        logging.error(f"Error processing message event: {e}")
+# ══════════════════════════════════════════════════════════════════════════════
+# TOKEN REFRESH LOOP
+# ══════════════════════════════════════════════════════════════════════════════
+
+def token_refresh_loop(chatapp: ChatAppClient, ws_manager: WebSocketManager) -> None:
+    while True:
+        time.sleep(1800)
+        now            = int(time.time())
+        time_remaining = chatapp.token_end_time - now
+        logging.info(f"Token check — {time_remaining // 60} minutes remaining.")
+        if time_remaining < 7200:
+            logging.info("Token expiring soon — refreshing...")
+            if chatapp.refresh_tokens():
+                ws_manager.reconnect()
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# MESSAGE PIPELINE — ties everything together
+# ══════════════════════════════════════════════════════════════════════════════
 
-def main():
-    global pusher_instance
+class MessagePipeline:
+    def __init__(self, chatapp: ChatAppClient, bitrix: BitrixClient, gmail: GmailClient):
+        self.chatapp  = chatapp
+        self.bitrix   = bitrix
+        self.gmail    = gmail
+        self.chain    = build_checking_chain()
 
-    if not load_chatapp_credentials():
-        prompt_and_save_chatapp_credentials()
+    def process(self, data: str) -> None:
+        try:
+            payload        = json.loads(data)
+            inner          = payload.get("payload", {})
+            meta           = inner.get("meta", {})
+            messages       = inner.get("data", [])
+            license_id     = meta.get("licenseId", LICENSE_ID)
+            messenger_type = meta.get("messengerType", MESSENGER_TYPE)
 
-    # Load or fetch tokens
-    if not load_tokens():
-        logging.info("No saved tokens found — fetching new ones...")
-        if not fetch_new_tokens():
-            logging.error("Could not obtain tokens. Exiting.")
-            return
+            for raw_msg in messages:
+                from_api = raw_msg.get("fromApi")
+                text     = raw_msg.get("message", {}).get("text")
 
-    # Start background token refresh thread
-    refresh_thread = threading.Thread(target=token_refresh_loop, daemon=True)
-    refresh_thread.start()
+                if from_api:
+                    continue
+
+                ctx = MessageContext.from_raw(raw_msg, license_id, messenger_type)
+
+                # Skip our own warning messages
+                if text and "CBUAE regulations" in text:
+                    continue
+
+                # Enrich context with Bitrix data
+                client_num = ctx.phone if ctx.side == "in" else "+" + ctx.chat_id
+                ctx.lead_id, ctx.employee_name, ctx.employee_email = self.bitrix.get_lead_info(client_num)
+                ctx.employee_link = self.bitrix.get_employee_link(ctx.employee_name)
+
+                # Run through checking chain
+                result = self.chain.handle(ctx)
+                if not result or not result.flagged:
+                    return
+
+                logging.warning(f"Message flagged — reasons: {result.reasons}")
+
+                # Execute the appropriate strategy
+                strategy = resolve_strategy(result)
+                strategy.execute(ctx, result, self.chatapp, self.bitrix, self.gmail)
+
+        except Exception as e:
+            logging.error(f"Error processing message: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════════════════════════
+
+def main() -> None:
+    # Initialise facades
+    chatapp = ChatAppClient()
+    bitrix  = BitrixClient(webhook=BITRIX_WEBHOOK)
+    gmail   = GmailClient()
+
+    # ChatApp credentials
+    if not chatapp.load_credentials():
+        chatapp.prompt_credentials()
+
+    # Tokens
+    if not chatapp.ensure_tokens():
+        logging.error("Could not obtain tokens. Exiting.")
+        return
+
+    # Message pipeline
+    pipeline   = MessagePipeline(chatapp, bitrix, gmail)
+    ws_manager = WebSocketManager(chatapp, pipeline.process)
+
+    # Token refresh background thread
+    threading.Thread(
+        target=token_refresh_loop,
+        args=(chatapp, ws_manager),
+        daemon=True
+    ).start()
     logging.info("Token refresh thread started.")
 
     # Start WebSocket
-    start_websocket()
-    logging.info("Listener started — monitoring for file messages...")
+    ws_manager.start()
+    logging.info("Listener started — monitoring for messages...")
 
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
         logging.info("Shutting down...")
-        if ws_instance:
-            ws_instance.close()
+        ws_manager.close()
+
 
 if __name__ == "__main__":
     main()
