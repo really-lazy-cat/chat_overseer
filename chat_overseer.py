@@ -193,13 +193,16 @@ class ChatAppClient:
         self.session = requests.Session()
         retry_strategy = Retry(
             total=3,
+            connect=3,
             backoff_factor=1,  # Waits 1s, 2s, 4s between retries
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["POST"]
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         self.session.mount("https://", adapter)
-        self.session.mount("http://", adapter)
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
 
     # ── Credentials ───────────────────────────────────────────────────────────
 
@@ -255,36 +258,46 @@ class ChatAppClient:
                 "refreshTokenEndTime":data["refreshTokenEndTime"],
             }, f)
         logging.info("Tokens saved.")
-
+    
     def fetch_new_tokens(self) -> bool:
-        response = self.session.post(
-            f"{self.base_url}/v1/tokens",
-            headers={"Content-Type": "application/json"},
-            json={"email": self._email, "password": self._password, "appId": self._app_id}
-        )
-        if response.ok:
-            self._save_tokens(response.json()["data"])
-            logging.info("New tokens fetched.")
-            return True
-        logging.error(f"Failed to fetch tokens: {response.status_code} — {response.text}")
-        return False
+        try:
+            response = self.session.post(
+                f"{self.base_url}/v1/tokens",
+                headers={"Content-Type": "application/json"},
+                json={"email": self._email, "password": self._password, "appId": self._app_id},
+                timeout=10
+            )
+            if response.ok:
+                self._save_tokens(response.json()["data"])
+                logging.info("New tokens fetched.")
+                return True
+            logging.error(f"Failed to fetch tokens: {response.status_code} — {response.text}")
+            return False
+        except requests.RequestException as e:
+            logging.error(f"Network error fetching new tokens: {e}")
+            return False
 
     def refresh_tokens(self) -> bool:
-        response = self.session.post(
-            f"{self.base_url}/v1/tokens/refresh",
-            headers={"Content-Type": "application/json"},
-            json={"refreshToken": self.refresh_token}
-        )
-        if response.ok:
-            self._save_tokens(response.json()["data"])
-            logging.info("Tokens refreshed.")
-            return True
-        elif response.status_code == 403:
-            logging.warning("Refresh token expired — fetching new tokens...")
-            return self.fetch_new_tokens()
-        logging.error(f"Failed to refresh tokens: {response.status_code} — {response.text}")
-        return False
-
+        try:
+            response = self.session.post(
+                f"{self.base_url}/v1/tokens/refresh",
+                headers={"Content-Type": "application/json"},
+                json={"refreshToken": self.refresh_token},
+                timeout=10
+            )
+            if response.ok:
+                self._save_tokens(response.json()["data"])
+                logging.info("Tokens refreshed.")
+                return True
+            elif response.status_code == 403:
+                logging.warning("Refresh token expired — fetching new tokens...")
+                return self.fetch_new_tokens()
+            logging.error(f"Failed to refresh tokens: {response.status_code} — {response.text}")
+            return False
+        except requests.RequestException as e:
+            logging.error(f"Network error refreshing tokens: {e}")
+            return False
+        
     def ensure_tokens(self) -> bool:
         if not self.load_tokens():
             logging.info("No saved tokens — fetching new ones...")
@@ -294,23 +307,29 @@ class ChatAppClient:
     # ── API Calls ─────────────────────────────────────────────────────────────
 
     def authenticate_channel(self, socket_id: str, channel_name: str) -> Optional[str]:
-        response = self.session.post(
-            f"{self.base_url}/broadcasting/auth",
-            headers={"Authorization": self.access_token, "Content-Type": "application/json"},
-            json={"socket_id": socket_id, "channel_name": channel_name}
-        )
-        if response.ok:
-            return response.json().get("auth")
-        logging.error(f"Channel auth failed: {response.status_code} — {response.text}")
-        return None
-
+        try:
+            response = self.session.post(
+                f"{self.base_url}/broadcasting/auth",
+                headers={"Authorization": self.access_token, "Content-Type": "application/json"},
+                json={"socket_id": socket_id, "channel_name": channel_name},
+                timeout=10
+            )
+            if response.ok:
+                return response.json().get("auth")
+            logging.error(f"Channel auth failed: {response.status_code} — {response.text}")
+            return None
+        except requests.RequestException as e:
+            logging.error(f"Network error during channel auth: {e}")
+            return None
+    
     def send_warning(self, license_id: int, messenger_type: str, chat_id: str, text: str) -> tuple[bool, str]:
         url = f"{self.base_url}/v1/licenses/{license_id}/messengers/{messenger_type}/chats/{chat_id}/messages/text"
         try:
             response = self.session.post(
                 url,
                 headers={"Authorization": self.access_token, "Content-Type": "application/json"},
-                json={"text": text}
+                json={"text": text},
+                timeout=10
             )
             if response.ok:
                 time_sent = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -329,10 +348,9 @@ class ChatAppClient:
 
 class BitrixClient:
     def __init__(self, webhook: str):
-        # 1. Strip the trailing slash to prevent the '//' bug
-        self.webhook = webhook.rstrip('/')
+        self.webhook = webhook
         
-        # 2. Create a session with a retry strategy for network/DNS glitches
+        # Create a session with a retry strategy for network/DNS glitches
         self.session = requests.Session()
         
         # This will retry up to 3 times, backing off automatically
@@ -356,7 +374,8 @@ class BitrixClient:
                     "entityTypeId": 1,
                     "select": ["ID", "ASSIGNED_BY_ID"],
                     "filter": {"phone": client_num}
-                }
+                },
+                timeout=10,
             )
             items = response.json().get("result", {}).get("items", [])
             if not items:
@@ -402,7 +421,8 @@ class BitrixClient:
                         "CRM_ENTITY_TYPE": "lead",
                         "CRM_ENTITY": lead_id,
                         "ACTIVE_ONLY": "N"
-                    }
+                    },
+                    timeout=10,
                 )
                 chat_response.raise_for_status()
                 chats = chat_response.json().get("result", [])
@@ -423,7 +443,8 @@ class BitrixClient:
                     json={
                         "DIALOG_ID": f"chat{chat_id}",
                         "LIMIT": 20
-                    }
+                    },
+                    timeout=10,
                 )
                 messages_response.raise_for_status()
                 messages = messages_response.json().get("result", {}).get("messages", [])
